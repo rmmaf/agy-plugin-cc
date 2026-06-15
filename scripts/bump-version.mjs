@@ -30,16 +30,24 @@ const TARGETS = [
       },
       {
         label: "packages[\"\"].version",
+        // npm v1 lockfiles (lockfileVersion 1) use `dependencies` and have no
+        // top-level `packages` object, so this nested field is optional.
+        optional: (json) => !json.packages || typeof json.packages !== "object" || !json.packages[""],
         get: (json) => json.packages?.[""]?.version,
         set: (json, version) => {
-          requireObject(json.packages?.[""], "package-lock.json packages[\"\"]");
+          // Skip the nested field gracefully when it is absent (npm v1); the
+          // top-level `version` setter above still keeps the lockfile in sync.
+          if (!json.packages || typeof json.packages !== "object" || !json.packages[""]) {
+            return;
+          }
+          requireObject(json.packages[""], "package-lock.json packages[\"\"]");
           json.packages[""].version = version;
         }
       }
     ]
   },
   {
-    file: "plugins/codex/.claude-plugin/plugin.json",
+    file: "plugins/agy/.claude-plugin/plugin.json",
     values: [
       {
         label: "version",
@@ -62,7 +70,7 @@ const TARGETS = [
         }
       },
       {
-        label: "plugins[codex].version",
+        label: "plugins[agy].version",
         get: (json) => findMarketplacePlugin(json).version,
         set: (json, version) => {
           findMarketplacePlugin(json).version = version;
@@ -132,8 +140,8 @@ function requireObject(value, label) {
 }
 
 function findMarketplacePlugin(json) {
-  const plugin = json.plugins?.find((entry) => entry?.name === "codex");
-  requireObject(plugin, ".claude-plugin/marketplace.json plugins[codex]");
+  const plugin = json.plugins?.find((entry) => entry?.name === "agy");
+  requireObject(plugin, ".claude-plugin/marketplace.json plugins[agy]");
   return plugin;
 }
 
@@ -162,6 +170,9 @@ function checkVersions(root, expectedVersion) {
   for (const target of TARGETS) {
     const json = readJson(root, target.file);
     for (const value of target.values) {
+      if (typeof value.optional === "function" && value.optional(json)) {
+        continue;
+      }
       const actual = value.get(json);
       if (actual !== expectedVersion) {
         mismatches.push(`${target.file} ${value.label}: expected ${expectedVersion}, found ${actual ?? "<missing>"}`);

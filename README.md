@@ -1,22 +1,21 @@
-# Codex plugin for Claude Code
+# agy plugin for Claude Code
 
-Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
+Use agy from inside Claude Code for code reviews or to delegate tasks to agy.
 
-This plugin is for Claude Code users who want an easy way to start using Codex from the workflow
+This plugin is for Claude Code users who want an easy way to start using agy from the workflow
 they already have.
 
 <video src="./docs/plugin-demo.webm" controls muted playsinline autoplay></video>
 
 ## What You Get
 
-- `/codex:review` for a normal read-only Codex review
-- `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work and manage background jobs
+- `/agy:review` for a normal read-only agy review
+- `/agy:adversarial-review` for a steerable challenge review
+- `/agy:rescue`, `/agy:status`, `/agy:result`, and `/agy:cancel` to delegate work and manage background jobs
 
 ## Requirements
 
-- **ChatGPT subscription (incl. Free) or OpenAI API key.**
-  - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
+- **A Google account.** The first `agy` run signs you in with Google. No separate API key is required.
 - **Node.js 18.18 or later**
 
 ## Install
@@ -24,13 +23,13 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add openai/agy-plugin-cc
 ```
 
 Install the plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install agy@agy
 ```
 
 Reload plugins:
@@ -42,41 +41,36 @@ Reload plugins:
 Then run:
 
 ```bash
-/codex:setup
+/agy:setup
 ```
 
-`/codex:setup` will tell you whether Codex is ready. If Codex is missing and npm is available, it can offer to install Codex for you.
+`/agy:setup` will tell you whether agy is ready. If agy is missing, it can point you at the install command.
 
-If you prefer to install Codex yourself, use:
+If you prefer to install agy yourself:
 
-```bash
-npm install -g @openai/codex
-```
+- Windows: `irm https://antigravity.google/cli/install.ps1 | iex`
+- macOS/Linux: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 
-If Codex is installed but not logged in yet, run:
-
-```bash
-!codex login
-```
+If agy is installed but not signed in yet, run `agy` once interactively to complete the Google sign-in (in a headless environment it prints a URL and a one-time code to authorize).
 
 After install, you should see:
 
 - the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
+- the `agy:agy-rescue` subagent in `/agents`
 
 One simple first run is:
 
 ```bash
-/codex:review --background
-/codex:status
-/codex:result
+/agy:review --background
+/agy:status
+/agy:result
 ```
 
 ## Usage
 
-### `/codex:review`
+### `/agy:review`
 
-Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
+Runs a normal agy review on your current work. It gives you the same quality of code review as running `/review` inside agy directly.
 
 > [!NOTE]
 > Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.
@@ -86,26 +80,26 @@ Use it when you want:
 - a review of your current uncommitted changes
 - a review of your branch compared to a base branch like `main`
 
-Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/codex:adversarial-review`](#codexadversarial-review) when you want to challenge a specific decision or risk area.
+Use `--base <ref>` for branch review. It also supports `--wait` and `--background`. It is not steerable and does not take custom focus text. Use [`/agy:adversarial-review`](#agyadversarial-review) when you want to challenge a specific decision or risk area.
 
 Examples:
 
 ```bash
-/codex:review
-/codex:review --base main
-/codex:review --background
+/agy:review
+/agy:review --base main
+/agy:review --background
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+This command is read-only and will not perform any changes. When run in the background you can use [`/agy:status`](#agystatus) to check on the progress and [`/agy:cancel`](#agycancel) to cancel the ongoing task.
 
-### `/codex:adversarial-review`
+### `/agy:adversarial-review`
 
 Runs a **steerable** review that questions the chosen implementation and design.
 
 It can be used to pressure-test assumptions, tradeoffs, failure modes, and whether a different approach would have been safer or simpler.
 
-It uses the same review target selection as `/codex:review`, including `--base <ref>` for branch review.
-It also supports `--wait` and `--background`. Unlike `/codex:review`, it can take extra focus text after the flags.
+It uses the same review target selection as `/agy:review`, including `--base <ref>` for branch review.
+It also supports `--wait` and `--background`. Unlike `/agy:review`, it can take extra focus text after the flags.
 
 Use it when you want:
 
@@ -116,22 +110,22 @@ Use it when you want:
 Examples:
 
 ```bash
-/codex:adversarial-review
-/codex:adversarial-review --base main challenge whether this was the right caching and retry design
-/codex:adversarial-review --background look for race conditions and question the chosen approach
+/agy:adversarial-review
+/agy:adversarial-review --base main challenge whether this was the right caching and retry design
+/agy:adversarial-review --background look for race conditions and question the chosen approach
 ```
 
 This command is read-only. It does not fix code.
 
-### `/codex:rescue`
+### `/agy:rescue`
 
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+Hands a task to agy through the `agy:agy-rescue` subagent.
 
-Use it when you want Codex to:
+Use it when you want agy to:
 
 - investigate a bug
 - try a fix
-- continue a previous Codex task
+- continue a previous agy task
 - take a faster or cheaper pass with a smaller model
 
 > [!NOTE]
@@ -142,35 +136,36 @@ It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--
 Examples:
 
 ```bash
-/codex:rescue investigate why the tests started failing
-/codex:rescue fix the failing test with the smallest safe patch
-/codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
-/codex:rescue --background investigate the regression
+/agy:rescue investigate why the tests started failing
+/agy:rescue fix the failing test with the smallest safe patch
+/agy:rescue --resume apply the top fix from the last run
+/agy:rescue --model <name> investigate the flaky integration test
+/agy:rescue --background investigate the regression
 ```
 
-You can also just ask for a task to be delegated to Codex:
+List the model names you can pass to `--model` with `agy models`.
+
+You can also just ask for a task to be delegated to agy:
 
 ```text
-Ask Codex to redesign the database connection to be more resilient.
+Ask agy to redesign the database connection to be more resilient.
 ```
 
 **Notes:**
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
-- follow-up rescue requests can continue the latest Codex task in the repo
+- if you do not pass `--model`, agy chooses its own default.
+- the `--effort` flag is accepted but currently ignored by the agy backend, so it has no effect today.
+- follow-up rescue requests can continue the latest agy task in the repo
 
-### `/codex:status`
+### `/agy:status`
 
-Shows running and recent Codex jobs for the current repository.
+Shows running and recent agy jobs for the current repository.
 
 Examples:
 
 ```bash
-/codex:status
-/codex:status task-abc123
+/agy:status
+/agy:status task-abc123
 ```
 
 Use it to:
@@ -179,127 +174,118 @@ Use it to:
 - see the latest completed job
 - confirm whether a task is still running
 
-### `/codex:result`
+### `/agy:result`
 
-Shows the final stored Codex output for a finished job.
-When available, it also includes the Codex session ID so you can reopen that run directly in Codex with `codex resume <session-id>`.
-
-Examples:
-
-```bash
-/codex:result
-/codex:result task-abc123
-```
-
-### `/codex:cancel`
-
-Cancels an active background Codex job.
+Shows the final stored agy output for a finished job.
+When available, it also includes the agy conversation ID so you can reopen that run directly in agy with `agy --continue` or `agy --conversation=<id>`.
 
 Examples:
 
 ```bash
-/codex:cancel
-/codex:cancel task-abc123
+/agy:result
+/agy:result task-abc123
 ```
 
-### `/codex:setup`
+### `/agy:cancel`
 
-Checks whether Codex is installed and authenticated.
-If Codex is missing and npm is available, it can offer to install Codex for you.
+Cancels an active background agy job.
 
-You can also use `/codex:setup` to manage the optional review gate.
+Examples:
+
+```bash
+/agy:cancel
+/agy:cancel task-abc123
+```
+
+### `/agy:setup`
+
+Checks whether agy is installed and authenticated.
+If agy is missing, it can point you at the install command for your platform.
+
+You can also use `/agy:setup` to manage the optional review gate.
 
 #### Enabling review gate
 
 ```bash
-/codex:setup --enable-review-gate
-/codex:setup --disable-review-gate
+/agy:setup --enable-review-gate
+/agy:setup --disable-review-gate
 ```
 
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
+When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted agy review based on Claude's response. If that review finds issues, the stop is blocked so Claude can address them first.
 
 > [!WARNING]
-> The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
+> The review gate can create a long-running Claude/agy loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
 
 ## Typical Flows
 
 ### Review Before Shipping
 
 ```bash
-/codex:review
+/agy:review
 ```
 
-### Hand A Problem To Codex
+### Hand A Problem To agy
 
 ```bash
-/codex:rescue investigate why the build is failing in CI
+/agy:rescue investigate why the build is failing in CI
 ```
 
 ### Start Something Long-Running
 
 ```bash
-/codex:adversarial-review --background
-/codex:rescue --background investigate the flaky test
+/agy:adversarial-review --background
+/agy:rescue --background investigate the flaky test
 ```
 
 Then check in with:
 
 ```bash
-/codex:status
-/codex:result
+/agy:status
+/agy:result
 ```
 
-## Codex Integration
+## agy Integration
 
-The Codex plugin wraps the [Codex app server](https://developers.openai.com/codex/app-server). It uses the global `codex` binary installed in your environment and [applies the same configuration](https://developers.openai.com/codex/config-basic).
+The agy plugin drives the global `agy` binary installed in your environment. It runs agy as a one-shot headless CLI (`agy --print <prompt>`) and reads the model's answer from agy's transcript file, then applies your existing agy configuration. See the [Antigravity docs](https://antigravity.google/docs) for more.
 
 ### Common Configurations
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
+You can change the default model the plugin uses per run by passing `--model <name>`. List the available model names with `agy models`. The plugin also picks up whatever agy configuration you already have on the machine.
 
-```toml
-model = "gpt-5.4-mini"
-model_reasoning_effort = "high"
-```
+Note that the `--effort` (reasoning effort) flag is accepted but currently ignored by the agy backend, so it has no effect today.
 
-Your configuration will be picked up based on:
+The `--write` flag maps to agy's workspace-write sandbox only when that is configured via the `AGY_SANDBOX_WRITE` environment variable.
 
-- user-level config in `~/.codex/config.toml`
-- project-level overrides in `.codex/config.toml`
-- project-level overrides only load when the [project is trusted](https://developers.openai.com/codex/config-advanced#project-config-files-codexconfigtoml)
+Check out the [Antigravity docs](https://antigravity.google/docs) for more configuration options.
 
-Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference).
+### Moving The Work Over To agy
 
-### Moving The Work Over To Codex
+Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be resumed inside agy by running `agy --continue`, or `agy --conversation=<id>` with the conversation ID you received from `/agy:result` or `/agy:status`.
 
-Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
-
-This way you can review the Codex work or continue the work there.
+This way you can review the agy work or continue the work there.
 
 ## FAQ
 
-### Do I need a separate Codex account for this plugin?
+### Do I need a separate agy account for this plugin?
 
-If you are already signed into Codex on this machine, that account should work immediately here too. This plugin uses your local Codex CLI authentication.
+If you are already signed into agy on this machine, that account should work immediately here too. This plugin uses your local agy CLI authentication.
 
-If you only use Claude Code today and have not used Codex yet, you will also need to sign in to Codex with either a ChatGPT account or an API key. [Codex is available with your ChatGPT subscription](https://developers.openai.com/codex/pricing/), and [`codex login`](https://developers.openai.com/codex/cli/reference/#codex-login) supports both ChatGPT and API key sign-in. Run `/codex:setup` to check whether Codex is ready, and use `!codex login` if it is not.
+If you only use Claude Code today and have not used agy yet, run `agy` once interactively to complete the Google sign-in (in a headless environment it prints a URL and a one-time code to authorize). Run `/agy:setup` to check whether agy is ready.
 
-### Does the plugin use a separate Codex runtime?
+### Does the plugin use a separate agy runtime?
 
-No. This plugin delegates through your local [Codex CLI](https://developers.openai.com/codex/cli/) and [Codex app server](https://developers.openai.com/codex/app-server/) on the same machine.
+No. This plugin delegates through your local agy CLI on the same machine. It runs agy as a one-shot headless command (`agy --print <prompt>`) rather than a long-lived service.
 
 That means:
 
-- it uses the same Codex install you would use directly
+- it uses the same agy install you would use directly
 - it uses the same local authentication state
 - it uses the same repository checkout and machine-local environment
 
-### Will it use the same Codex config I already have?
+### Will it use the same agy config I already have?
 
-Yes. If you already use Codex, the plugin picks up the same [configuration](#common-configurations).
+Yes. If you already use agy, the plugin picks up the same [configuration](#common-configurations).
 
-### Can I keep using my current API key or base URL setup?
+### Can I keep using my current sign-in?
 
-Yes. Because the plugin uses your local Codex CLI, your existing sign-in method and config still apply.
-
-If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
+Yes. Because the plugin uses your local agy CLI, your existing Google sign-in and config still apply.
