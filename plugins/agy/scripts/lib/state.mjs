@@ -12,6 +12,35 @@ const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
 
+let atomicWriteCounter = 0;
+
+/**
+ * Atomically write `contents` to `target` by writing to a uniquely named
+ * temporary file on the same directory/volume and then renaming over the
+ * target. `fs.renameSync` is atomic on the same volume on both Windows and
+ * POSIX, so concurrent writers can never observe a torn/partial file
+ * (last-writer-wins). The temp name includes the pid and a monotonic counter
+ * so two writers never collide on the temp file itself. The temp file is
+ * cleaned up on a best-effort basis if the write or rename fails.
+ */
+function atomicWriteFileSync(target, contents) {
+  atomicWriteCounter += 1;
+  const tmp = `${target}.${process.pid}.${atomicWriteCounter}.tmp`;
+  try {
+    fs.writeFileSync(tmp, contents, "utf8");
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    try {
+      if (fs.existsSync(tmp)) {
+        fs.unlinkSync(tmp);
+      }
+    } catch {
+      // Best-effort cleanup; ignore failures removing the temp file.
+    }
+    throw error;
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -111,7 +140,7 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`);
   return nextState;
 }
 
@@ -166,7 +195,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
 }
 

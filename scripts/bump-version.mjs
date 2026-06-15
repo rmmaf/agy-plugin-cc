@@ -30,9 +30,17 @@ const TARGETS = [
       },
       {
         label: "packages[\"\"].version",
+        // npm v1 lockfiles (lockfileVersion 1) use `dependencies` and have no
+        // top-level `packages` object, so this nested field is optional.
+        optional: (json) => !json.packages || typeof json.packages !== "object" || !json.packages[""],
         get: (json) => json.packages?.[""]?.version,
         set: (json, version) => {
-          requireObject(json.packages?.[""], "package-lock.json packages[\"\"]");
+          // Skip the nested field gracefully when it is absent (npm v1); the
+          // top-level `version` setter above still keeps the lockfile in sync.
+          if (!json.packages || typeof json.packages !== "object" || !json.packages[""]) {
+            return;
+          }
+          requireObject(json.packages[""], "package-lock.json packages[\"\"]");
           json.packages[""].version = version;
         }
       }
@@ -162,6 +170,9 @@ function checkVersions(root, expectedVersion) {
   for (const target of TARGETS) {
     const json = readJson(root, target.file);
     for (const value of target.values) {
+      if (typeof value.optional === "function" && value.optional(json)) {
+        continue;
+      }
       const actual = value.get(json);
       if (actual !== expectedVersion) {
         mismatches.push(`${target.file} ${value.label}: expected ${expectedVersion}, found ${actual ?? "<missing>"}`);

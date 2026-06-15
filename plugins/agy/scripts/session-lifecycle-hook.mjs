@@ -32,10 +32,18 @@ function shellEscape(value) {
 }
 
 function appendEnvVar(name, value) {
-  if (!process.env.CLAUDE_ENV_FILE || value == null || value === "") {
+  const envFile = process.env.CLAUDE_ENV_FILE;
+  if (!envFile || value == null || value === "") {
     return;
   }
-  fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
+  let leadingNewline = "";
+  if (fs.existsSync(envFile)) {
+    const existing = fs.readFileSync(envFile, "utf8");
+    if (existing.length > 0 && !existing.endsWith("\n")) {
+      leadingNewline = "\n";
+    }
+  }
+  fs.appendFileSync(envFile, `${leadingNewline}export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
 function cleanupSessionJobs(cwd, sessionId) {

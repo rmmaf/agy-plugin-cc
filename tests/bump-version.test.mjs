@@ -71,6 +71,41 @@ test("bump-version updates every release manifest", () => {
   assert.equal(readJson(path.join(root, ".claude-plugin", "marketplace.json")).plugins[0].version, "1.2.3");
 });
 
+test("bump-version tolerates npm v1 lockfiles without a packages object", () => {
+  const root = makeVersionFixture();
+  // Replace the v3 lockfile with an npm v1 lockfile: it uses `dependencies`
+  // and has no top-level `packages` object.
+  writeJson(path.join(root, "package-lock.json"), {
+    name: "agy-plugin-cc",
+    version: "1.0.2",
+    lockfileVersion: 1,
+    dependencies: {
+      "left-pad": {
+        version: "1.3.0"
+      }
+    }
+  });
+
+  const result = run("node", [SCRIPT, "--root", root, "1.2.3"], {
+    cwd: ROOT
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+
+  const lockfile = readJson(path.join(root, "package-lock.json"));
+  assert.equal(lockfile.version, "1.2.3");
+  // The absent `packages` object is left untouched (still absent).
+  assert.equal(Object.prototype.hasOwnProperty.call(lockfile, "packages"), false);
+  // The v1 `dependencies` block is preserved as-is.
+  assert.deepEqual(lockfile.dependencies, { "left-pad": { version: "1.3.0" } });
+
+  // --check should also succeed against the v1 lockfile without throwing.
+  const check = run("node", [SCRIPT, "--root", root, "--check", "1.2.3"], {
+    cwd: ROOT
+  });
+  assert.equal(check.status, 0, check.stderr);
+});
+
 test("bump-version check mode reports stale metadata", () => {
   const root = makeVersionFixture();
   writeJson(path.join(root, "package.json"), {
