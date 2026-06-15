@@ -461,8 +461,8 @@ export async function runAppServerReview(cwd, options = {}) {
   const targetLabel =
     target.type === "baseBranch" ? `base branch ${target.branch}` : "the uncommitted changes";
   const prompt = [
-    `Review ${targetLabel} in this repository.`,
-    "Identify bugs, correctness issues, security problems, and risky design decisions.",
+    `Review ${targetLabel} in this repository as a senior engineer giving a constructive code review.`,
+    "Point out likely bugs, logic errors, broken edge cases, regressions, and questionable design or maintainability decisions.",
     "Be concrete: cite file paths and line numbers, and lead with the most important issues."
   ].join(" ");
 
