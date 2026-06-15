@@ -23,7 +23,7 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/agy-plugin-cc
+/plugin marketplace add rmmaf/agy-plugin-cc
 ```
 
 Install the plugin:

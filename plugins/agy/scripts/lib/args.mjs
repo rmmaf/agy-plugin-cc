@@ -75,19 +75,25 @@ export function parseArgs(argv, config = {}) {
 
 export function splitRawArgumentString(raw) {
   const tokens = [];
+  const characters = [...raw];
   let current = "";
   let quote = null;
-  let escaping = false;
 
-  for (const character of raw) {
-    if (escaping) {
-      current += character;
-      escaping = false;
-      continue;
-    }
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
 
+    // A backslash is a LITERAL character by default. It only acts as an escape
+    // when the NEXT character is a quote ("), an apostrophe ('), another
+    // backslash (\\), or whitespace. This preserves Windows paths such as
+    // C:\Users\me while still letting power users escape a quote/space/backslash.
     if (character === "\\") {
-      escaping = true;
+      const next = characters[index + 1];
+      if (next === "\"" || next === "'" || next === "\\" || (next !== undefined && /\s/.test(next))) {
+        current += next;
+        index += 1;
+        continue;
+      }
+      current += "\\";
       continue;
     }
 
@@ -114,10 +120,6 @@ export function splitRawArgumentString(raw) {
     }
 
     current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
   }
 
   if (current) {
