@@ -655,15 +655,25 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  // Persist the request-bearing job record BEFORE spawning the detached worker.
+  // The worker's first action is readStoredJob and it requires `request`; if it
+  // ran before this write it would die immediately on a missing payload.
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
+  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
+  upsertJob(job.workspaceRoot, queuedRecord);
+
+  const child = spawnDetachedTaskWorker(cwd, job.id);
+
+  // Record the spawned worker's pid now that the request file already exists on
+  // disk, so the worker can never observe a request-less / absent job file.
+  queuedRecord.pid = child.pid ?? null;
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
 
@@ -792,6 +802,30 @@ async function handleTask(argv) {
   );
 }
 
+function failBackgroundJob(workspaceRoot, jobId, errorMessage, storedJob = null) {
+  // A bad enqueue (absent or request-less job file) must surface as a terminal
+  // "failed" job rather than a worker that dies silently (stdio:"ignore") and
+  // leaves the job stuck "queued" forever.
+  const completedAt = nowIso();
+  writeJobFile(workspaceRoot, jobId, {
+    ...(storedJob ?? { id: jobId, workspaceRoot }),
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage,
+    completedAt
+  });
+  upsertJob(workspaceRoot, {
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage,
+    completedAt
+  });
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
@@ -803,14 +837,19 @@ async function handleTaskWorker(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
+  const jobId = options["job-id"];
+  const storedJob = readStoredJob(workspaceRoot, jobId);
   if (!storedJob) {
-    throw new Error(`No stored job found for ${options["job-id"]}.`);
+    const message = `No stored job found for ${jobId}.`;
+    failBackgroundJob(workspaceRoot, jobId, message, null);
+    throw new Error(message);
   }
 
   const request = storedJob.request;
   if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
+    const message = `Stored job ${jobId} is missing its task request payload.`;
+    failBackgroundJob(workspaceRoot, jobId, message, storedJob);
+    throw new Error(message);
   }
 
   const { logFile, progress } = createTrackedProgress(
@@ -940,7 +979,13 @@ async function handleCancel(argv) {
     );
   }
 
-  terminateProcessTree(job.pid ?? Number.NaN);
+  // A failed termination (e.g. taskkill "Access is denied." on Windows) must not
+  // abort the cancel: the job still has to be recorded as cancelled below.
+  try {
+    terminateProcessTree(job.pid ?? Number.NaN);
+  } catch (err) {
+    appendLogLine(job.logFile, `Process termination failed: ${err.message}`);
+  }
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();

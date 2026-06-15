@@ -142,6 +142,16 @@ function runStopReview(cwd, input = {}) {
 
 function main() {
   const input = readHookInput();
+
+  // Infinite-loop guard: Claude Code sets stop_hook_active when this Stop hook
+  // is re-running because a previous invocation already blocked. Allowing the
+  // stop here prevents an unbounded block->retry->block loop (each retry spawns
+  // another agy review) that would drain usage when agy keeps returning BLOCK.
+  if (input.stop_hook_active) {
+    logNote("Stop hook already active; allowing stop to avoid an unbounded review loop.");
+    return;
+  }
+
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);

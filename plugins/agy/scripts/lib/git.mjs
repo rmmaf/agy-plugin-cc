@@ -90,6 +90,20 @@ export function getRepoRoot(cwd) {
   return gitChecked(cwd, ["rev-parse", "--show-toplevel"]).stdout.trim();
 }
 
+export function refExists(cwd, ref) {
+  const result = git(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  return result.status === 0;
+}
+
+function assertBaseRefExists(cwd, ref) {
+  if (!refExists(cwd, ref)) {
+    throw new Error(
+      `Base ref "${ref}" was not found in this repository. ` +
+        `Pass an existing branch/commit to --base (e.g. "main" or "origin/main").`
+    );
+  }
+}
+
 export function detectDefaultBranch(cwd) {
   const symbolic = git(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
   if (symbolic.status === 0) {
@@ -140,6 +154,7 @@ export function resolveReviewTarget(cwd, options = {}) {
   const supportedScopes = new Set(["auto", "working-tree", "branch"]);
 
   if (baseRef) {
+    assertBaseRefExists(cwd, baseRef);
     return {
       mode: "branch",
       label: `branch diff against ${baseRef}`,

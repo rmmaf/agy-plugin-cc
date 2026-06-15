@@ -604,6 +604,62 @@ export function stripCodeFence(text) {
   return withoutClose.trim();
 }
 
+// Recover a JSON payload that is embedded in surrounding prose (a preamble
+// before a code fence, trailing commentary after the closing fence, or a bare
+// object dropped inline). Used only as a SECOND attempt, after the strict
+// stripCodeFence + JSON.parse path fails. Returns the candidate JSON substring
+// or null when nothing object-shaped can be located.
+//
+// @param {string} text
+// @returns {string | null}
+function extractJsonCandidate(text) {
+  const source = String(text ?? "");
+
+  // (1) The first fenced block anywhere in the text: ```[lang]\n ... \n```.
+  // Capture the inner content of the FIRST such region.
+  const fenced = source.match(/```[^\n]*\r?\n([\s\S]*?)\r?\n?```/);
+  if (fenced && fenced[1] !== undefined) {
+    return fenced[1].trim();
+  }
+
+  // (2) The first balanced top-level {...} object substring. Scan for the first
+  // "{", then track brace depth until it returns to 0, while respecting JSON
+  // string literals and escapes so braces inside strings do not miscount.
+  const start = source.indexOf("{");
+  if (start === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
 export function parseStructuredOutput(rawOutput, fallback = {}) {
   if (!rawOutput) {
     return {
@@ -614,7 +670,8 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
     };
   }
 
-  // Parse the de-fenced text, but keep the ORIGINAL rawOutput for display.
+  // First attempt: parse the de-fenced text (handles bare fences and plain
+  // JSON), but keep the ORIGINAL rawOutput for display.
   const candidate = stripCodeFence(rawOutput);
   try {
     return {
@@ -624,6 +681,24 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
       ...fallback
     };
   } catch (error) {
+    // Second attempt: the JSON payload is likely wrapped in surrounding prose
+    // (a preamble before the fence, trailing commentary, or an inline object).
+    // Try to recover it without loosening the contract — rawOutput stays
+    // verbatim and genuinely-non-JSON input still yields a parseError.
+    const recovered = extractJsonCandidate(rawOutput);
+    if (recovered !== null && recovered !== candidate) {
+      try {
+        return {
+          parsed: JSON.parse(recovered),
+          parseError: null,
+          rawOutput,
+          ...fallback
+        };
+      } catch {
+        // fall through to the original parseError below
+      }
+    }
+
     return {
       parsed: null,
       parseError: error.message,
