@@ -103,8 +103,13 @@ export function getAntigravityAvailability(cwd) {
 // real signal when one is found instead of assuming the user is authenticated.
 function detectCredentialSignal() {
   const stateDir = resolveStateDir();
+  // agy stores Google credentials in the Gemini home — the PARENT of the state
+  // dir (e.g. ~/.gemini/oauth_creds.json, ~/.gemini/google_accounts.json), not
+  // inside ~/.gemini/antigravity-cli. Search both so a real login is detected.
+  const geminiHome = path.dirname(stateDir);
   const candidates = [
     "oauth_creds.json",
+    "google_accounts.json",
     "credentials.json",
     "auth.json",
     "token.json",
@@ -113,7 +118,7 @@ function detectCredentialSignal() {
     "user.json"
   ];
   for (const name of candidates) {
-    for (const dir of [stateDir, path.join(stateDir, "cache"), path.join(stateDir, "auth")]) {
+    for (const dir of [stateDir, geminiHome, path.join(stateDir, "cache"), path.join(stateDir, "auth")]) {
       try {
         if (fs.existsSync(path.join(dir, name))) {
           return true;
