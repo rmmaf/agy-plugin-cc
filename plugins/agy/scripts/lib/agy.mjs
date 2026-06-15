@@ -100,7 +100,7 @@ function cleanStderr(stderr) {
 
 export function getAntigravityAvailability(cwd) {
   const result = spawnAgy(["--version"], cwd);
-  if (result.error?.code === "ENOENT") {
+  if (/** @type {NodeJS.ErrnoException | undefined} */ (result.error)?.code === "ENOENT") {
     return { available: false, detail: "not found" };
   }
   if (result.error) {
@@ -354,6 +354,12 @@ function readTranscript(stateDir, conversationId) {
 
   let finalMessage = "";
   let lastTurnId = null;
+  // Track whether ANY final MODEL entry was produced, independent of whether it
+  // carried text. A turn that ends on tool calls/edits emits PLANNER_RESPONSE
+  // entries with empty text, so `finalMessage` stays "" even though the run
+  // succeeded — callers use `sawFinalEntry` to tell that apart from a genuinely
+  // empty run (no model response at all).
+  let sawFinalEntry = false;
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -366,6 +372,7 @@ function readTranscript(stateDir, conversationId) {
       continue;
     }
     if (isFinalModelEntry(entry)) {
+      sawFinalEntry = true;
       const text = extractEntryText(entry);
       if (text) {
         finalMessage = text;
@@ -374,7 +381,7 @@ function readTranscript(stateDir, conversationId) {
     }
   }
 
-  return { finalMessage, lastTurnId };
+  return { finalMessage, lastTurnId, sawFinalEntry };
 }
 
 /* ------------------------------------------------------------------ *
@@ -400,6 +407,7 @@ function buildSandboxArgs(sandbox) {
 }
 
 function spawnAgy(args, cwd) {
+  /** @type {import("node:child_process").SpawnSyncOptionsWithStringEncoding} */
   const baseOptions = {
     cwd,
     env: process.env,
@@ -421,7 +429,11 @@ function spawnAgy(args, cwd) {
   // gate prompt contains < > characters) survive intact. Fall back to a shell
   // on Windows only if a bare `agy` can't be found that way (e.g. a .cmd shim).
   let result = spawnSync(command, fullArgs, { ...baseOptions, shell: false });
-  if (result.error?.code === "ENOENT" && process.platform === "win32" && preArgs.length === 0) {
+  if (
+    /** @type {NodeJS.ErrnoException | undefined} */ (result.error)?.code === "ENOENT" &&
+    process.platform === "win32" &&
+    preArgs.length === 0
+  ) {
     result = spawnSync(command, fullArgs, { ...baseOptions, shell: true });
   }
   return result;
@@ -467,7 +479,8 @@ export async function runAppServerTurn(cwd, options = {}) {
   // failure: a stuck run must never look like a successful turn just because a
   // stale transcript happens to exist on disk.
   const timedOut =
-    result.error?.code === "ETIMEDOUT" || (result.signal !== null && result.signal !== undefined);
+    /** @type {NodeJS.ErrnoException | undefined} */ (result.error)?.code === "ETIMEDOUT" ||
+    (result.signal !== null && result.signal !== undefined);
   if (timedOut) {
     const timeoutMs = resolveAgyTimeoutMs();
     return {
@@ -493,16 +506,24 @@ export async function runAppServerTurn(cwd, options = {}) {
   const stdoutText = String(result.stdout ?? "").trim();
   const finalMessage = stdoutText || transcript?.finalMessage || "";
 
+  // A turn that ends on tool calls or file edits (the common shape for `--write`
+  // tasks) leaves an empty final answer even though agy ran and may have changed
+  // files. That is NOT a failure: only treat an empty answer as failed when the
+  // process itself failed OR no final MODEL entry was produced at all. Otherwise
+  // a successful write run was being reported as a failure.
+  const sawFinalEntry = Boolean(transcript?.sawFinalEntry);
   const spawnFailed = Boolean(result.error) || (typeof result.status === "number" && result.status !== 0);
-  const failed = spawnFailed || !finalMessage;
+  const failed = spawnFailed || (!finalMessage && !sawFinalEntry);
+
+  const emptyAnswerNote = failed
+    ? stderr || "Antigravity produced no readable answer (no transcript entry was found)."
+    : `Antigravity finished the turn without a text answer (it likely ended on tool calls or file edits). Review your working tree with \`git status\` / \`git diff\`, or resume with \`agy --conversation=${conversationId ?? "<id>"}\`.`;
 
   return {
     status: failed ? 1 : 0,
     threadId: conversationId,
     turnId: transcript?.lastTurnId ?? null,
-    finalMessage:
-      finalMessage ||
-      (stderr ? stderr : "Antigravity produced no readable answer (no transcript entry was found)."),
+    finalMessage: finalMessage || emptyAnswerNote,
     reasoningSummary: [],
     touchedFiles: [],
     stderr,
@@ -545,7 +566,10 @@ export function findLatestTaskThread(workspaceRoot) {
   return newest ? { id: newest.id } : null;
 }
 
-export async function interruptAppServerTurn(cwd, { threadId, turnId } = {}) {
+export async function interruptAppServerTurn(
+  cwd,
+  /** @type {{ threadId?: string | null, turnId?: string | null }} */ { threadId, turnId } = {}
+) {
   // agy runs as a one-shot CLI; there is no live turn to interrupt over a
   // protocol. Cancellation is handled by terminating the worker process tree
   // in the companion. Report honestly so the caller can log it.
