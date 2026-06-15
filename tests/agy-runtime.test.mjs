@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeAgy, readFakeState } from "./fake-agy-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+import { parseStructuredOutput, runAppServerTurn, stripCodeFence } from "../plugins/agy/scripts/lib/agy.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "agy");
@@ -193,4 +194,93 @@ test("stop-review gate allows the stop (no decision) when agy returns ALLOW", ()
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "");
+});
+
+/* ------------------------------------------------------------------ *
+ * parseStructuredOutput / stripCodeFence (fix #0: fenced JSON)
+ * ------------------------------------------------------------------ */
+
+test("parseStructuredOutput parses a ```json-fenced object and keeps the original raw output", () => {
+  const raw = "```json\n{\"verdict\":\"BLOCK\",\"issues\":[\"x\"]}\n```";
+  const result = parseStructuredOutput(raw);
+
+  assert.equal(result.parseError, null);
+  assert.deepEqual(result.parsed, { verdict: "BLOCK", issues: ["x"] });
+  // rawOutput must remain the ORIGINAL fenced text for display.
+  assert.equal(result.rawOutput, raw);
+  assert.ok(result.rawOutput.includes("```"), "raw output must preserve the markdown fence");
+});
+
+test("parseStructuredOutput parses a bare ``` fence and tolerates surrounding whitespace", () => {
+  const bare = parseStructuredOutput("```\n{\"a\":1}\n```");
+  assert.equal(bare.parseError, null);
+  assert.deepEqual(bare.parsed, { a: 1 });
+
+  const padded = parseStructuredOutput("\n\n  ```json\n  {\"b\":2}\n  ```  \n");
+  assert.equal(padded.parseError, null);
+  assert.deepEqual(padded.parsed, { b: 2 });
+});
+
+test("parseStructuredOutput still parses plain unfenced JSON", () => {
+  const result = parseStructuredOutput("{\"ok\":true}");
+  assert.equal(result.parseError, null);
+  assert.deepEqual(result.parsed, { ok: true });
+});
+
+test("parseStructuredOutput yields parsed:null and a parseError for non-JSON", () => {
+  const result = parseStructuredOutput("this is not json");
+  assert.equal(result.parsed, null);
+  assert.ok(result.parseError, "expected a parseError for non-JSON input");
+  assert.equal(result.rawOutput, "this is not json");
+});
+
+test("stripCodeFence returns trimmed content for unfenced text", () => {
+  assert.equal(stripCodeFence("  hello  "), "hello");
+  assert.equal(stripCodeFence("```json\n{\"x\":1}\n```"), "{\"x\":1}");
+});
+
+/* ------------------------------------------------------------------ *
+ * spawnAgy timeout (fix #3: never hang forever)
+ * ------------------------------------------------------------------ */
+
+test("runAppServerTurn fails fast (does not hang) when agy exceeds AGY_TIMEOUT_MS", async () => {
+  const repo = setupRepo();
+  const stateDir = makeTempDir();
+  const binDir = makeTempDir();
+  // A fake agy that never exits within the timeout: it just sleeps far longer
+  // than the tiny AGY_TIMEOUT_MS we set below, simulating a stuck/blocked run.
+  const slowScript = path.join(binDir, "slow-agy.cjs");
+  fs.writeFileSync(slowScript, "setTimeout(() => {}, 60000);\n", "utf8");
+
+  const previousEnv = {
+    AGY_BIN: process.env.AGY_BIN,
+    AGY_BIN_ARG: process.env.AGY_BIN_ARG,
+    AGY_STATE_DIR: process.env.AGY_STATE_DIR,
+    AGY_TIMEOUT_MS: process.env.AGY_TIMEOUT_MS
+  };
+  process.env.AGY_BIN = process.execPath;
+  process.env.AGY_BIN_ARG = slowScript;
+  process.env.AGY_STATE_DIR = stateDir;
+  process.env.AGY_TIMEOUT_MS = "300";
+
+  try {
+    const started = Date.now();
+    const result = await runAppServerTurn(repo, { prompt: "do something slow" });
+    const elapsed = Date.now() - started;
+
+    assert.equal(result.status, 1, "a timed-out run must report failure status 1");
+    assert.match(result.finalMessage, /timed out after 300 ms/i);
+    assert.match(result.finalMessage, /AGY_TIMEOUT_MS/);
+    assert.equal(result.threadId, null, "a timed-out run must not correlate a conversation id");
+    // It must return well before the child's 60s sleep would have completed.
+    assert.ok(elapsed < 10000, `expected fast failure, took ${elapsed}ms`);
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 });

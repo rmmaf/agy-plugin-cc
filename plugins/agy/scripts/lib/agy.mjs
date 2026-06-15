@@ -36,7 +36,23 @@ export const DEFAULT_CONTINUE_PROMPT =
 
 const TASK_THREAD_NAME = "Antigravity Companion Task";
 const PRINT_MAX_BUFFER = 64 * 1024 * 1024;
+// Bounded wall-clock budget for a single agy invocation. The child's stdin is
+// closed immediately (input: "") so an interactive prompt sees EOF instead of
+// blocking, but a genuinely stuck model run still needs a hard ceiling so the
+// worker/session can never hang forever. Override via AGY_TIMEOUT_MS.
+const DEFAULT_AGY_TIMEOUT_MS = 600000; // 10 minutes
 const CONVERSATION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function resolveAgyTimeoutMs() {
+  const raw = process.env.AGY_TIMEOUT_MS;
+  if (raw && raw.trim()) {
+    const parsed = Number(raw.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_AGY_TIMEOUT_MS;
+}
 
 function resolveStateDir() {
   const override = process.env.AGY_STATE_DIR;
@@ -258,19 +274,31 @@ function resolveConversationId(stateDir, before, resumeThreadId) {
 
   const after = listConversations(stateDir);
 
-  // Prefer a conversation that is new or was touched during this run.
-  const touched = after
-    .filter((conversation) => {
-      const previous = before.get(conversation.id);
-      return previous === undefined || conversation.mtimeMs > previous;
-    })
-    .sort((left, right) => right.mtimeMs - left.mtimeMs);
-  if (touched.length > 0) {
-    return touched[0].id;
+  // Correlate by the before/after SET DIFFERENCE rather than an mtime scan: the
+  // caller snapshots existing conversation ids into `before`, so a conversation
+  // that is present now but absent from `before` was created by THIS run. This
+  // is robust even when two conversations share an mtime (an mtime-only scan
+  // can tie-break to the wrong one). The CLI generates its own conversation ids
+  // and `--conversation` only RESUMES an existing one, so we cannot pin a fresh
+  // id up front — set difference is the most race-resistant correlation we can
+  // do post-hoc.
+  const newConversations = after.filter((conversation) => !before.has(conversation.id));
+  if (newConversations.length === 1) {
+    // Exactly one new conversation: unambiguous, even under mtime ties.
+    return newConversations[0].id;
+  }
+  if (newConversations.length > 1) {
+    // Genuinely concurrent runs created multiple new conversations at once.
+    // RESIDUAL CONCURRENCY CAVEAT: we cannot tell which new conversation
+    // belongs to THIS run, so we pick the newest by mtime as a best effort.
+    // Pinning a client-supplied id would fix this, but the agy CLI does not
+    // support supplying a fresh conversation id (only resuming an existing one).
+    return [...newConversations].sort((left, right) => right.mtimeMs - left.mtimeMs)[0].id;
   }
 
-  // Fall back to agy's own "most recent conversation" pointer, then to the
-  // newest conversation directory overall.
+  // No new conversation id (resume/reuse of an existing conversation). Fall
+  // back to agy's own "most recent conversation" pointer, then to the newest
+  // conversation directory overall.
   const cached = readLastConversationId(stateDir);
   if (cached) {
     return cached;
@@ -377,7 +405,13 @@ function spawnAgy(args, cwd) {
     env: process.env,
     encoding: "utf8",
     maxBuffer: PRINT_MAX_BUFFER,
-    windowsHide: true
+    windowsHide: true,
+    // Hard wall-clock ceiling so a stuck agy run can never hang the worker
+    // forever; on expiry spawnSync kills the child and reports ETIMEDOUT/signal.
+    timeout: resolveAgyTimeoutMs(),
+    // Close the child's stdin immediately so any interactive confirmation
+    // prompt (e.g. in --write mode) reads EOF instead of blocking on a pipe.
+    input: ""
   };
 
   const { command, preArgs } = resolveAgyCommand();
@@ -427,6 +461,27 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   const result = spawnAgy(args, cwd);
   const stderr = cleanStderr(result.stderr);
+
+  // spawnSync surfaces a timeout as error.code === "ETIMEDOUT" and/or by
+  // killing the child with a signal (e.g. SIGTERM). Treat either as a hard
+  // failure: a stuck run must never look like a successful turn just because a
+  // stale transcript happens to exist on disk.
+  const timedOut =
+    result.error?.code === "ETIMEDOUT" || (result.signal !== null && result.signal !== undefined);
+  if (timedOut) {
+    const timeoutMs = resolveAgyTimeoutMs();
+    return {
+      status: 1,
+      threadId: null,
+      turnId: null,
+      finalMessage: `Antigravity timed out after ${timeoutMs} ms (set AGY_TIMEOUT_MS to adjust).`,
+      reasoningSummary: [],
+      touchedFiles: [],
+      stderr,
+      error: result.error ?? null,
+      turn: { id: "agy-turn", status: "failed" }
+    };
+  }
 
   emitProgress(options.onProgress, "Reading Antigravity transcript.", "finalizing");
 
@@ -506,6 +561,25 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId } = {}) {
  * Structured output helpers
  * ------------------------------------------------------------------ */
 
+// The agy/Gemini model frequently wraps its JSON answer in a markdown code
+// fence (```json ... ```), which makes a raw JSON.parse throw on the leading
+// backticks. Strip a single leading fence line (```json / ``` with optional
+// whitespace) and a trailing ``` fence, tolerating surrounding whitespace and
+// newlines. Returns the inner content when a fence is present, else the
+// trimmed input. Exported so callers/tests can reuse the same normalization.
+export function stripCodeFence(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed.startsWith("```")) {
+    return trimmed;
+  }
+  // Drop the opening fence line: ``` optionally followed by a language tag
+  // (e.g. ```json) and trailing whitespace, up to and including its newline.
+  const withoutOpen = trimmed.replace(/^```[^\n]*\r?\n?/, "");
+  // Drop a trailing fence (``` possibly preceded by whitespace/newlines).
+  const withoutClose = withoutOpen.replace(/\r?\n?[ \t]*```[ \t]*$/, "");
+  return withoutClose.trim();
+}
+
 export function parseStructuredOutput(rawOutput, fallback = {}) {
   if (!rawOutput) {
     return {
@@ -516,9 +590,11 @@ export function parseStructuredOutput(rawOutput, fallback = {}) {
     };
   }
 
+  // Parse the de-fenced text, but keep the ORIGINAL rawOutput for display.
+  const candidate = stripCodeFence(rawOutput);
   try {
     return {
-      parsed: JSON.parse(rawOutput),
+      parsed: JSON.parse(candidate),
       parseError: null,
       rawOutput,
       ...fallback

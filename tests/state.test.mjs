@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
-import { readJobFile, resolveJobFile, resolveJobLogFile, resolveJobsDir, resolveStateDir, resolveStateFile, saveState, writeJobFile } from "../plugins/agy/scripts/lib/state.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, resolveJobLogFile, resolveJobsDir, resolveStateDir, resolveStateFile, saveState, setConfig, upsertJob, writeJobFile } from "../plugins/agy/scripts/lib/state.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -151,4 +151,49 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
       .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`])
       .sort()
   );
+});
+
+test("mutating calls release the cross-process lock and leave no .state.lock behind", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const lockDir = path.join(stateDir, ".state.lock");
+
+  // Exercise each lock-guarded mutating entry point.
+  setConfig(workspace, "stopReviewGate", true);
+  upsertJob(workspace, { id: "job-lock", status: "running" });
+  upsertJob(workspace, { id: "job-lock", status: "completed" });
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs: [] });
+
+  // The mutations must have actually applied (correctness under the lock).
+  assert.equal(getConfig(workspace).stopReviewGate, false);
+  assert.deepEqual(listJobs(workspace), []);
+
+  // The happy path must never leave a stale lock directory behind.
+  assert.equal(fs.existsSync(lockDir), false, "the .state.lock dir must be released after each mutation");
+});
+
+test("withStateLock degrades without deadlocking when the lock dir is pre-held", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const lockDir = path.join(stateDir, ".state.lock");
+
+  // Pre-create the lock dir to simulate another live holder. The lock budget is
+  // ~2s, so the call must return shortly after that WITHOUT hanging — it
+  // degrades to last-writer-wins rather than blocking forever.
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(lockDir);
+
+  const started = Date.now();
+  const result = setConfig(workspace, "stopReviewGate", true);
+  const elapsed = Date.now() - started;
+
+  // The mutation still succeeds (degraded, lock-free).
+  assert.equal(result.config.stopReviewGate, true);
+  // It must give up well within a few seconds, never deadlock.
+  assert.ok(elapsed < 5000, `expected lock acquisition to give up quickly, took ${elapsed}ms`);
+  // Our caller did NOT own the pre-held lock, so it must not remove it.
+  assert.equal(fs.existsSync(lockDir), true, "a degraded caller must not delete a lock it never held");
+
+  // Cleanup the simulated holder's lock.
+  fs.rmdirSync(lockDir);
 });
