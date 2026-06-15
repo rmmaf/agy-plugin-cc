@@ -29,6 +29,7 @@ import {
   getConfig,
   listJobs,
   setConfig,
+  updateState,
   upsertJob,
   writeJobFile
 } from "./lib/state.mjs";
@@ -671,11 +672,22 @@ function enqueueBackgroundTask(cwd, job, request) {
 
   const child = spawnDetachedTaskWorker(cwd, job.id);
 
-  // Record the spawned worker's pid now that the request file already exists on
-  // disk, so the worker can never observe a request-less / absent job file.
-  queuedRecord.pid = child.pid ?? null;
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  // Record the worker pid ONLY while the job is still queued, as an atomic
+  // conditional merge under the state lock. A fast worker may already have
+  // advanced the job to running/completed/failed by now; rewriting the full
+  // "queued" record (or any unconditional status write) here would RESURRECT a
+  // finished/failed worker back to "queued". Once the worker is running it
+  // records its own pid via runTrackedJob, so there is nothing to do then. We
+  // also do not rewrite the job .json here — the worker owns it from runTrackedJob
+  // onward.
+  if (child.pid != null) {
+    updateState(job.workspaceRoot, (state) => {
+      const existing = state.jobs.find((entry) => entry.id === job.id);
+      if (existing && existing.status === "queued") {
+        existing.pid = child.pid;
+      }
+    });
+  }
 
   return {
     payload: {
