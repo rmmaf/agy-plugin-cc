@@ -629,7 +629,7 @@ export async function runAppServerTurn(cwd, options = {}) {
   // bounded window before concluding there is no answer. Disabled with
   // AGY_TRANSCRIPT_SETTLE_MS=0 (e.g. in tests) for an immediate single read.
   const settleMs = resolveTranscriptSettleMs();
-  if (settleMs > 0) {
+  if (conversationId && settleMs > 0) {
     const deadline = Date.now() + settleMs;
     while (
       (!transcript || (!transcript.finalMessage && !transcript.sawFinalEntry)) &&
