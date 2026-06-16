@@ -14,6 +14,9 @@ Primary helper:
 How the runtime works:
 - `agy` runs as a one-shot headless CLI via `agy --print <prompt>`. There is no JSON-RPC "app server" and there are no protocol "threads".
 - Because of a known upstream bug, `agy --print` writes nothing to stdout under a non-TTY. The companion therefore reads the model's answer from agy's transcript file at `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl` (the final entry with `source=MODEL`, `status=DONE`, `type=PLANNER_RESPONSE`).
+- The companion falls back to the sibling `transcript_full.jsonl` when `transcript.jsonl` is absent or carries no final entry, and briefly re-reads the transcript (settle/retry) before concluding there was no answer. The wait is bounded and tunable via `AGY_TRANSCRIPT_SETTLE_MS` (`0` disables it).
+- Every captured result is persisted to a uniquely-named file at `<pluginStateDir>/answers/<id>.json` and surfaced as `answerFile` in the JSON payload, so a real answer is never lost to a flaky read and stays retrievable from a stable path. The transcript remains the source of truth.
+- When agy produces nothing at all (no transcript written — typically the session was still authenticating), the run reports `diagnostic: "auth-or-incomplete"` and an actionable message telling the user to run `agy` once interactively to sign in, instead of an opaque "no transcript entry" error.
 - Resume uses agy's own `--conversation=<id>` / `--continue`, not protocol threads.
 
 Execution rules:

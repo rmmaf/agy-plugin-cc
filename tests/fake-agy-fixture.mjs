@@ -105,14 +105,21 @@ function answerFor(text) {
 const answer = answerFor(prompt);
 
 const logDir = path.join(stateDir, "brain", id, ".system_generated", "logs");
-fs.mkdirSync(logDir, { recursive: true });
-fs.writeFileSync(
-  path.join(logDir, "transcript.jsonl"),
+const transcriptBody =
   [
     JSON.stringify({ source: "USER", status: "DONE", type: "USER_MESSAGE", text: prompt || "" }),
     JSON.stringify({ source: "MODEL", status: "DONE", type: "PLANNER_RESPONSE", id: "turn-" + id, text: answer })
-  ].join("\\n") + "\\n"
-);
+  ].join("\\n") + "\\n";
+if (BEHAVIOR === "none") {
+  // Mimic an auth-incomplete run: the conversation dir exists but agy never
+  // wrote any transcript (no model answer was produced).
+  fs.mkdirSync(path.join(stateDir, "brain", id), { recursive: true });
+} else {
+  // "full-only" exercises the transcript_full.jsonl fallback: only the sibling
+  // file is written, never the primary transcript.jsonl.
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(path.join(logDir, BEHAVIOR === "full-only" ? "transcript_full.jsonl" : "transcript.jsonl"), transcriptBody);
+}
 
 const cacheDir = path.join(stateDir, "cache");
 fs.mkdirSync(cacheDir, { recursive: true });
