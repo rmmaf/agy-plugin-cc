@@ -684,8 +684,13 @@ export async function runAppServerTurn(cwd, options = {}) {
   // to failure, so it is swallowed.
   let answerFile = null;
   try {
-    const answerId =
-      conversationId && isConversationId(conversationId) ? `answer-${conversationId}` : generateJobId("answer");
+    // Unique per RUN, not just per conversation: a resumed conversation writes a
+    // new answer every turn, so keying only by conversationId would overwrite the
+    // previous turn's answer. generateJobId adds a time+random suffix; the
+    // conversation id (when known) stays in the name for grouping/discoverability.
+    const answerPrefix =
+      conversationId && isConversationId(conversationId) ? `answer-${conversationId}` : "answer";
+    const answerId = generateJobId(answerPrefix);
     answerFile = writeAnswerFile(cwd, answerId, {
       schemaVersion: 1,
       answerId,

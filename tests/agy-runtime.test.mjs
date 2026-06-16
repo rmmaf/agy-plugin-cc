@@ -172,6 +172,30 @@ test("task --resume-last resumes the prior conversation by id", () => {
   assert.equal(fakeState.lastRun.conversation, firstConversation);
 });
 
+test("each run gets a distinct answer file, even when resuming the same conversation", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv();
+  const e = { ...env, AGY_TRANSCRIPT_SETTLE_MS: "0" };
+
+  const first = run("node", [SCRIPT, "task", "initial task", "--json"], { cwd: repo, env: e });
+  assert.equal(first.status, 0, first.stderr);
+  const firstPayload = JSON.parse(first.stdout);
+
+  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up", "--json"], { cwd: repo, env: e });
+  assert.equal(resume.status, 0, resume.stderr);
+  const resumePayload = JSON.parse(resume.stdout);
+
+  // Same conversation is resumed...
+  assert.ok(firstPayload.threadId);
+  assert.equal(resumePayload.threadId, firstPayload.threadId, "resume must reuse the conversation id");
+  // ...but each turn must persist to its OWN file — the resumed turn must not
+  // overwrite the first turn's answer.
+  assert.ok(firstPayload.answerFile && resumePayload.answerFile, "both runs must record an answer file");
+  assert.notEqual(firstPayload.answerFile, resumePayload.answerFile, "each run must get a unique answer file");
+  assert.ok(fs.existsSync(firstPayload.answerFile), "the first turn's answer file must still exist");
+  assert.ok(fs.existsSync(resumePayload.answerFile), "the resumed turn's answer file must exist");
+});
+
 test("review runs the native reviewer and renders the transcript output", () => {
   const repo = setupRepo();
   const { env } = fakeEnv();
