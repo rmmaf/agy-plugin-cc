@@ -83,9 +83,13 @@ function sleepSync(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      // busy-wait fallback
+    try {
+      spawnSync(process.execPath, ["-e", "setTimeout(() => {}, " + ms + ")"]);
+    } catch {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        // busy-wait fallback
+      }
     }
   }
 }
