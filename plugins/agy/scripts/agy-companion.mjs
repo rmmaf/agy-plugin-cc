@@ -378,7 +378,9 @@ async function executeReviewRun(request) {
         status: result.status,
         stderr: result.stderr,
         stdout: result.reviewText,
-        reasoning: result.reasoningSummary
+        reasoning: result.reasoningSummary,
+        answerFile: result.answerFile ?? null,
+        diagnostic: result.diagnostic ?? null
       }
     };
     const rendered = renderNativeReviewResult(
@@ -429,7 +431,9 @@ async function executeReviewRun(request) {
       status: result.status,
       stderr: result.stderr,
       stdout: result.finalMessage,
-      reasoning: result.reasoningSummary
+      reasoning: result.reasoningSummary,
+      answerFile: result.answerFile ?? null,
+      diagnostic: result.diagnostic ?? null
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -510,7 +514,9 @@ async function executeTaskRun(request) {
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    answerFile: result.answerFile ?? null,
+    diagnostic: result.diagnostic ?? null
   };
 
   return {

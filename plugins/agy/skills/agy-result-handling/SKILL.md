@@ -16,6 +16,7 @@ When the helper returns agy output:
 - If agy made edits, say so explicitly and list the touched files when the helper provides them.
 - For `agy:agy-rescue`, do not turn a failed or incomplete agy run into a Claude-side implementation attempt. Report the failure and stop.
 - For `agy:agy-rescue`, if agy was never successfully invoked, do not generate a substitute answer at all.
+- If the helper reports `diagnostic: "auth-or-incomplete"` (or a message telling the user to run `agy` interactively to authenticate), treat it as a genuinely empty run: direct the user to sign in via `/agy:setup` and do NOT fabricate an answer. The full captured result is saved at the `answerFile` path if you need to reference it.
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed agy run, include the most actionable stderr lines and stop there instead of guessing.
 - If the helper reports that setup or authentication is required, direct the user to `/agy:setup` and do not improvise alternate auth flows.

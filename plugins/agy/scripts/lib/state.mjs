@@ -10,6 +10,7 @@ const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "Antigravity-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
+const ANSWERS_DIR_NAME = "answers";
 const LOCK_DIR_NAME = ".state.lock";
 const MAX_JOBS = 50;
 
@@ -90,6 +91,10 @@ export function resolveJobsDir(cwd) {
 
 export function ensureStateDir(cwd) {
   fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
+}
+
+export function resolveAnswersDir(cwd) {
+  return path.join(resolveStateDir(cwd), ANSWERS_DIR_NAME);
 }
 
 export function loadState(cwd) {
@@ -305,6 +310,19 @@ export function writeJobFile(cwd, jobId, payload) {
   const jobFile = resolveJobFile(cwd, jobId);
   atomicWriteFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
+}
+
+// Durable, append-only record of a single agy run's captured result, keyed by a
+// unique id (the conversation id when known, else a generated job id). This is a
+// best-effort audit trail OUTSIDE the job lifecycle — deliberately NOT touched
+// by pruneJobs/state.json, so a flaky transcript read never loses a result that
+// was actually produced and the answer stays retrievable from a stable path.
+export function writeAnswerFile(cwd, answerId, payload) {
+  const dir = resolveAnswersDir(cwd);
+  fs.mkdirSync(dir, { recursive: true });
+  const answerFile = path.join(dir, `${answerId}.json`);
+  atomicWriteFileSync(answerFile, `${JSON.stringify(payload, null, 2)}\n`);
+  return answerFile;
 }
 
 export function readJobFile(jobFile) {

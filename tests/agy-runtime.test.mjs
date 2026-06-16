@@ -78,6 +78,70 @@ test("task succeeds, returns the transcript answer, and records a completed job 
   assert.ok(report.latestFinished.threadId, "expected a captured conversation id");
 });
 
+test("task persists the captured answer to a unique answer file", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv();
+
+  const result = run("node", [SCRIPT, "task", "investigate the failing test", "--json"], {
+    cwd: repo,
+    env: { ...env, AGY_TRANSCRIPT_SETTLE_MS: "0" }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.ok(payload.answerFile, "expected an answerFile path in the task payload");
+  assert.ok(fs.existsSync(payload.answerFile), "expected the answer file to exist on disk");
+
+  const saved = JSON.parse(fs.readFileSync(payload.answerFile, "utf8"));
+  assert.equal(saved.status, 0);
+  assert.equal(saved.hadTextAnswer, true);
+  assert.equal(saved.transcriptSource, "transcript.jsonl");
+  assert.equal(saved.diagnostic, null);
+  assert.match(saved.finalMessage, /Handled the requested task/);
+});
+
+test("task reads the answer from transcript_full.jsonl when transcript.jsonl is absent", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv("full-only");
+
+  const result = run("node", [SCRIPT, "task", "investigate the failing test", "--json"], {
+    cwd: repo,
+    env: { ...env, AGY_TRANSCRIPT_SETTLE_MS: "0" }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.status, 0);
+  assert.match(payload.rawOutput, /Handled the requested task/);
+  assert.ok(payload.answerFile && fs.existsSync(payload.answerFile));
+
+  const saved = JSON.parse(fs.readFileSync(payload.answerFile, "utf8"));
+  assert.equal(saved.transcriptSource, "transcript_full.jsonl");
+});
+
+test("task surfaces an actionable auth diagnostic when agy produces no transcript", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv("none");
+
+  const result = run("node", [SCRIPT, "task", "investigate the failing test", "--json"], {
+    cwd: repo,
+    env: { ...env, AGY_TRANSCRIPT_SETTLE_MS: "0" }
+  });
+
+  // A run that produced nothing at all is a failure (non-zero exit).
+  assert.notEqual(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.status, 1);
+  assert.equal(payload.diagnostic, "auth-or-incomplete");
+  assert.match(payload.rawOutput, /authenticate|sign-?in|agy/i);
+  // The opaque legacy message must NOT be used for the genuinely-empty case.
+  assert.doesNotMatch(payload.rawOutput, /no transcript entry was found/);
+
+  const saved = JSON.parse(fs.readFileSync(payload.answerFile, "utf8"));
+  assert.equal(saved.diagnostic, "auth-or-incomplete");
+  assert.equal(saved.hadTextAnswer, false);
+});
+
 test("task forwards --model verbatim without rewriting it to a fabricated alias", () => {
   const repo = setupRepo();
   const { binDir, env } = fakeEnv();
@@ -106,6 +170,30 @@ test("task --resume-last resumes the prior conversation by id", () => {
 
   const fakeState = readFakeState(binDir);
   assert.equal(fakeState.lastRun.conversation, firstConversation);
+});
+
+test("each run gets a distinct answer file, even when resuming the same conversation", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv();
+  const e = { ...env, AGY_TRANSCRIPT_SETTLE_MS: "0" };
+
+  const first = run("node", [SCRIPT, "task", "initial task", "--json"], { cwd: repo, env: e });
+  assert.equal(first.status, 0, first.stderr);
+  const firstPayload = JSON.parse(first.stdout);
+
+  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up", "--json"], { cwd: repo, env: e });
+  assert.equal(resume.status, 0, resume.stderr);
+  const resumePayload = JSON.parse(resume.stdout);
+
+  // Same conversation is resumed...
+  assert.ok(firstPayload.threadId);
+  assert.equal(resumePayload.threadId, firstPayload.threadId, "resume must reuse the conversation id");
+  // ...but each turn must persist to its OWN file — the resumed turn must not
+  // overwrite the first turn's answer.
+  assert.ok(firstPayload.answerFile && resumePayload.answerFile, "both runs must record an answer file");
+  assert.notEqual(firstPayload.answerFile, resumePayload.answerFile, "each run must get a unique answer file");
+  assert.ok(fs.existsSync(firstPayload.answerFile), "the first turn's answer file must still exist");
+  assert.ok(fs.existsSync(resumePayload.answerFile), "the resumed turn's answer file must exist");
 });
 
 test("review runs the native reviewer and renders the transcript output", () => {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { readJsonFile } from "./fs.mjs";
+import { generateJobId, writeAnswerFile } from "./state.mjs";
 
 /**
  * Antigravity CLI (`agy`) backend.
@@ -43,6 +44,13 @@ const PRINT_MAX_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_AGY_TIMEOUT_MS = 600000; // 10 minutes
 const CONVERSATION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+// agy may flush its transcript a beat AFTER the `--print` process exits, so an
+// immediate read can miss an answer that is about to land. Re-read for a short
+// bounded window before concluding "no answer". Override/disable via
+// AGY_TRANSCRIPT_SETTLE_MS (0 = read once, no waiting).
+const TRANSCRIPT_SETTLE_TOTAL_MS = 1200;
+const TRANSCRIPT_SETTLE_STEP_MS = 150;
+
 function resolveAgyTimeoutMs() {
   const raw = process.env.AGY_TIMEOUT_MS;
   if (raw && raw.trim()) {
@@ -52,6 +60,38 @@ function resolveAgyTimeoutMs() {
     }
   }
   return DEFAULT_AGY_TIMEOUT_MS;
+}
+
+function resolveTranscriptSettleMs() {
+  const raw = process.env.AGY_TRANSCRIPT_SETTLE_MS;
+  if (raw && raw.trim()) {
+    const parsed = Number(raw.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return TRANSCRIPT_SETTLE_TOTAL_MS;
+}
+
+// Synchronous, CPU-friendly sleep matching the spawnSync-based flow. Atomics.wait
+// blocks on an unshared int32 buffer that is never notified, so it simply times
+// out after `ms`; falls back to a bounded busy-wait if Atomics is unavailable.
+function sleepSync(ms) {
+  if (!(ms > 0)) {
+    return;
+  }
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    try {
+      spawnSync(process.execPath, ["-e", "setTimeout(() => {}, " + ms + ")"]);
+    } catch {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        // busy-wait fallback
+      }
+    }
+  }
 }
 
 function resolveStateDir() {
@@ -311,6 +351,41 @@ function transcriptPath(stateDir, conversationId) {
   return path.join(stateDir, "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
 }
 
+// agy writes a sibling `transcript_full.jsonl` next to `transcript.jsonl`. It
+// sometimes carries the final MODEL entry when the primary transcript is absent
+// or was never flushed for a `--print` run, so it is read as a fallback.
+function transcriptFullPath(stateDir, conversationId) {
+  return path.join(stateDir, "brain", conversationId, ".system_generated", "logs", "transcript_full.jsonl");
+}
+
+// Best-effort look at what agy left on disk for a conversation. Used to tell a
+// genuinely empty run (nothing written — e.g. the session was still
+// authenticating) apart from a run whose transcript merely lacked a text answer.
+function probeConversationArtifacts(stateDir, conversationId) {
+  const empty = {
+    hasBrainDir: false,
+    transcriptExists: false,
+    transcriptFullExists: false,
+    dbExists: false
+  };
+  if (!conversationId) {
+    return empty;
+  }
+  const exists = (target) => {
+    try {
+      return fs.existsSync(target);
+    } catch {
+      return false;
+    }
+  };
+  return {
+    hasBrainDir: exists(path.join(stateDir, "brain", conversationId)),
+    transcriptExists: exists(transcriptPath(stateDir, conversationId)),
+    transcriptFullExists: exists(transcriptFullPath(stateDir, conversationId)),
+    dbExists: exists(path.join(stateDir, "conversations", `${conversationId}.db`))
+  };
+}
+
 function isFinalModelEntry(entry) {
   if (!entry || typeof entry !== "object") {
     return false;
@@ -340,26 +415,17 @@ function extractEntryText(entry) {
   return "";
 }
 
-function readTranscript(stateDir, conversationId) {
-  if (!conversationId) {
-    return null;
-  }
-  const file = transcriptPath(stateDir, conversationId);
-  let raw;
-  try {
-    raw = fs.readFileSync(file, "utf8");
-  } catch {
-    return null;
-  }
-
+// Track whether ANY final MODEL entry was produced, independent of whether it
+// carried text. A turn that ends on tool calls/edits emits PLANNER_RESPONSE
+// entries with empty text, so `finalMessage` stays "" even though the run
+// succeeded — callers use `sawFinalEntry` to tell that apart from a genuinely
+// empty run (no model response at all). `entryCount` records how many JSONL
+// lines parsed, so callers can tell an empty file from one with content.
+function parseTranscriptText(raw) {
   let finalMessage = "";
   let lastTurnId = null;
-  // Track whether ANY final MODEL entry was produced, independent of whether it
-  // carried text. A turn that ends on tool calls/edits emits PLANNER_RESPONSE
-  // entries with empty text, so `finalMessage` stays "" even though the run
-  // succeeded — callers use `sawFinalEntry` to tell that apart from a genuinely
-  // empty run (no model response at all).
   let sawFinalEntry = false;
+  let entryCount = 0;
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -371,6 +437,7 @@ function readTranscript(stateDir, conversationId) {
     } catch {
       continue;
     }
+    entryCount += 1;
     if (isFinalModelEntry(entry)) {
       sawFinalEntry = true;
       const text = extractEntryText(entry);
@@ -380,8 +447,46 @@ function readTranscript(stateDir, conversationId) {
       lastTurnId = entry.id ?? entry.turnId ?? entry.turn_id ?? lastTurnId;
     }
   }
+  return { finalMessage, lastTurnId, sawFinalEntry, entryCount };
+}
 
-  return { finalMessage, lastTurnId, sawFinalEntry };
+function readTranscriptFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  return parseTranscriptText(raw);
+}
+
+// Read the model answer from agy's transcript, preferring `transcript.jsonl`
+// and falling back to `transcript_full.jsonl` when the primary is absent or
+// carried no final entry. Returns the parsed result plus `source` (which file
+// the result came from), or null when neither file is readable.
+function readTranscript(stateDir, conversationId) {
+  if (!conversationId) {
+    return null;
+  }
+  const hasSignal = (parsed) => Boolean(parsed && (parsed.finalMessage || parsed.sawFinalEntry));
+
+  const primary = readTranscriptFile(transcriptPath(stateDir, conversationId));
+  if (hasSignal(primary)) {
+    return { ...primary, source: "transcript.jsonl" };
+  }
+  const full = readTranscriptFile(transcriptFullPath(stateDir, conversationId));
+  if (hasSignal(full)) {
+    return { ...full, source: "transcript_full.jsonl" };
+  }
+  // Neither carried a final entry. Preserve whatever was readable (empty
+  // finalMessage / sawFinalEntry=false) so callers see a consistent shape.
+  if (primary) {
+    return { ...primary, source: "transcript.jsonl" };
+  }
+  if (full) {
+    return { ...full, source: "transcript_full.jsonl" };
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -469,6 +574,21 @@ export async function runAppServerTurn(cwd, options = {}) {
   }
   args.push(...buildSandboxArgs(options.sandbox));
 
+  // Surface a best-effort auth warning BEFORE running: the most common cause of
+  // an empty run is an unconfirmed sign-in (the session spends its time logging
+  // in and never produces a turn). This is a WARNING, not a block — credential
+  // detection is heuristic and can yield a false negative.
+  let authWarning = null;
+  const authStatus = getAntigravityAuthStatus(cwd);
+  if (authStatus.available && !authStatus.loggedIn) {
+    authWarning = authStatus.detail;
+    emitProgress(
+      options.onProgress,
+      "Warning: could not confirm an Antigravity sign-in. If this run produces no answer, run `agy` once interactively to authenticate (or /agy:setup).",
+      "warning"
+    );
+  }
+
   emitProgress(options.onProgress, resuming ? "Resuming Antigravity conversation." : "Starting Antigravity run.", "starting");
 
   const result = spawnAgy(args, cwd);
@@ -492,6 +612,9 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: [],
       stderr,
       error: result.error ?? null,
+      answerFile: null,
+      diagnostic: "timeout",
+      authWarning,
       turn: { id: "agy-turn", status: "failed" }
     };
   }
@@ -499,7 +622,23 @@ export async function runAppServerTurn(cwd, options = {}) {
   emitProgress(options.onProgress, "Reading Antigravity transcript.", "finalizing");
 
   const conversationId = resolveConversationId(stateDir, before, options.resumeThreadId);
-  const transcript = readTranscript(stateDir, conversationId);
+  let transcript = readTranscript(stateDir, conversationId);
+
+  // agy may flush the transcript a beat AFTER the --print process exits, so the
+  // first read can miss an answer that is about to land. Re-read for a short
+  // bounded window before concluding there is no answer. Disabled with
+  // AGY_TRANSCRIPT_SETTLE_MS=0 (e.g. in tests) for an immediate single read.
+  const settleMs = resolveTranscriptSettleMs();
+  if (conversationId && settleMs > 0) {
+    const deadline = Date.now() + settleMs;
+    while (
+      (!transcript || (!transcript.finalMessage && !transcript.sawFinalEntry)) &&
+      Date.now() < deadline
+    ) {
+      sleepSync(Math.min(TRANSCRIPT_SETTLE_STEP_MS, deadline - Date.now()));
+      transcript = readTranscript(stateDir, conversationId);
+    }
+  }
 
   // stdout is normally empty under non-TTY, but honor it if a fixed agy version
   // ever does print, before falling back to the transcript.
@@ -515,19 +654,79 @@ export async function runAppServerTurn(cwd, options = {}) {
   const spawnFailed = Boolean(result.error) || (typeof result.status === "number" && result.status !== 0);
   const failed = spawnFailed || (!finalMessage && !sawFinalEntry);
 
-  const emptyAnswerNote = failed
-    ? stderr || "Antigravity produced no readable answer (no transcript entry was found)."
-    : `Antigravity finished the turn without a text answer (it likely ended on tool calls or file edits). Review your working tree with \`git status\` / \`git diff\`, or resume with \`agy --conversation=${conversationId ?? "<id>"}\`.`;
+  // Distinguish "agy produced nothing at all" (no transcript written — typically
+  // the session was still authenticating) from "ran but the final entry carried
+  // no text" (ended on tool calls/edits, which DOES write a transcript). Only the
+  // former gets the actionable auth hint instead of the opaque transcript message.
+  const artifacts = probeConversationArtifacts(stateDir, conversationId);
+  const producedNothing =
+    !finalMessage &&
+    !sawFinalEntry &&
+    !artifacts.transcriptExists &&
+    !artifacts.transcriptFullExists;
+  const diagnostic = failed && producedNothing && !spawnFailed ? "auth-or-incomplete" : null;
+
+  let emptyAnswerNote;
+  if (failed) {
+    if (diagnostic === "auth-or-incomplete") {
+      emptyAnswerNote =
+        "Antigravity could not confirm sign-in or did not produce a response. " +
+        "Run `agy` once interactively to authenticate (Google sign-in), then retry." +
+        (stderr ? `\n\nLast diagnostics:\n${stderr}` : "");
+    } else {
+      emptyAnswerNote = stderr || "Antigravity produced no readable answer (no transcript entry was found).";
+    }
+  } else {
+    emptyAnswerNote = `Antigravity finished the turn without a text answer (it likely ended on tool calls or file edits). Review your working tree with \`git status\` / \`git diff\`, or resume with \`agy --conversation=${conversationId ?? "<id>"}\`.`;
+  }
+
+  const resolvedMessage = finalMessage || emptyAnswerNote;
+
+  // Persist this run's captured result to a uniquely-named file so a real answer
+  // is never lost to a flaky/slow read and stays retrievable from a stable path
+  // (the user's request). Best-effort: a write error must never flip a good run
+  // to failure, so it is swallowed.
+  let answerFile = null;
+  try {
+    // Unique per RUN, not just per conversation: a resumed conversation writes a
+    // new answer every turn, so keying only by conversationId would overwrite the
+    // previous turn's answer. generateJobId adds a time+random suffix; the
+    // conversation id (when known) stays in the name for grouping/discoverability.
+    const answerPrefix =
+      conversationId && isConversationId(conversationId) ? `answer-${conversationId}` : "answer";
+    const answerId = generateJobId(answerPrefix);
+    answerFile = writeAnswerFile(cwd, answerId, {
+      schemaVersion: 1,
+      answerId,
+      conversationId: conversationId ?? null,
+      turnId: transcript?.lastTurnId ?? null,
+      status: failed ? 1 : 0,
+      finalMessage: resolvedMessage,
+      hadTextAnswer: Boolean(finalMessage),
+      sawFinalEntry,
+      transcriptSource: transcript?.source ?? null,
+      diagnostic,
+      authWarning,
+      stderr: stderr || null,
+      artifacts,
+      timestamp: new Date().toISOString()
+    });
+  } catch {
+    answerFile = null;
+  }
 
   return {
     status: failed ? 1 : 0,
     threadId: conversationId,
     turnId: transcript?.lastTurnId ?? null,
-    finalMessage: finalMessage || emptyAnswerNote,
+    finalMessage: resolvedMessage,
     reasoningSummary: [],
     touchedFiles: [],
     stderr,
     error: result.error ?? null,
+    answerFile,
+    diagnostic,
+    authWarning,
     turn: { id: transcript?.lastTurnId ?? "agy-turn", status: failed ? "failed" : "completed" }
   };
 }
@@ -556,7 +755,9 @@ export async function runAppServerReview(cwd, options = {}) {
     turnId: result.turnId,
     reviewText: result.finalMessage,
     reasoningSummary: result.reasoningSummary ?? [],
-    stderr: result.stderr
+    stderr: result.stderr,
+    answerFile: result.answerFile ?? null,
+    diagnostic: result.diagnostic ?? null
   };
 }
 
