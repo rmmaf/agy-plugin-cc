@@ -8,4 +8,4 @@
 - [agy architecture: tests/build/CI](agy-architecture-tests.md) — 11 node:test files, fake-agy-fixture (executable spec of the agy contract), bump-version, tsconfig, PR CI
 
 ## Runtime behavior
-- [agy real runtime behavior](agy-real-runtime-behavior.md) — agy v1.0.8 quirks the plugin depends on: tool-call turns read as empty/failed, --write persists but reports failure, AGY_STATE_DIR ignored, concurrent threadId misattribution
+- [agy real runtime behavior](agy-real-runtime-behavior.md) — agy v1.0.8 quirks the plugin handles or depends on: tool-call turns producing empty answers, --write persisting edits despite raw binary failure, AGY_STATE_DIR ignored, concurrent threadId misattribution
