@@ -17,4 +17,4 @@ The `agy-plugin-cc` plugin is a port of the Codex plugin that drives Google Anti
 - **A healthy run writes BOTH `transcript.jsonl` AND a sibling `transcript_full.jsonl`** in `.system_generated/logs/`. The full file is a viable fallback when the primary is missing/empty (the plugin now reads it as a fallback).
 - **agy v1.0.8 CLI has no output flag.** `agy --help`: only `--print/-p`, `--prompt`, `--continue/-c`, `--conversation <id>` (resume only), `--model`, `--print-timeout`, `--sandbox`, `--log-file`, `--add-dir`, `--dangerously-skip-permissions`, `-i`. No `--output`/`-o`, and `--log-file` only redirects Go diagnostic logs (no model answer). You cannot make agy write its answer to a chosen path.
 
-Context: a full test plan + 8 characterization tests (pinning current buggy behavior on branch `claude/lucid-cori-778e96`) were produced; build/CI/README fixes live unapplied in git worktree `wf_7dc1b150-af6-7`. See [[agy-plugin-confirmed-defects]].
+Context: a full test plan + 8 characterization tests (pinning current buggy behavior on branch `claude/lucid-cori-778e96`) were produced; build/CI/README fixes live unapplied in git worktree `wf_7dc1b150-af6-7`.
