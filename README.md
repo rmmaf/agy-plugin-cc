@@ -11,6 +11,9 @@ they already have.
 
 - `/agy:review` for a normal read-only agy review
 - `/agy:adversarial-review` for a steerable challenge review
+- `/agy:research` for a cited deep-research pass, with an optional project knowledge base
+- `/agy:generate-knowledge-base` to research gaps and build the project knowledge base
+- `/agy:analyse-plan` to have agy critique an implementation plan in a review loop
 - `/agy:rescue`, `/agy:status`, `/agy:result`, and `/agy:cancel` to delegate work and manage background jobs
 
 ## Requirements
@@ -117,6 +120,52 @@ Examples:
 
 This command is read-only. It does not fix code.
 
+### `/agy:research`
+
+Runs a deep web-research pass with agy and returns a cited Markdown report (TL;DR, observed facts, analysis, recommendation, open questions, references).
+
+Pick the depth with `--intensity`:
+
+- `low` — fast, 3–5 sources
+- `medium` — the default, 8–12 sources
+- `high` — exhaustive, 15+ sources (run it in the background; it can take ~20 minutes)
+
+It also supports `--wait`/`--background` and `--save` (force-save this run to the knowledge base).
+
+```bash
+/agy:research what are the current best practices for OAuth2 PKCE in SPAs
+/agy:research --intensity high --background compare vector databases for RAG
+```
+
+Saving to the knowledge base is off by default; enable it with `/agy:setup --enable-save-research` (or `--enable-save-reviewed-research` to fact-check first). Deep research needs live web access — if a run returns no sources, see [Common Configurations](#common-configurations) about the sandbox.
+
+### `/agy:generate-knowledge-base`
+
+Builds or extends a project knowledge base under `.claude/agy-knowledge-base/`, plus an auto-loading `agy-knowledge-base` skill that future sessions can consult.
+
+- With a topic, it researches that topic and saves it.
+- With no arguments, Claude inventories the existing knowledge base, analyzes the project and your saved memories, proposes topics that fill the gaps (architecture approaches, relevant technologies, domain background), confirms them with you, and researches each.
+
+```bash
+/agy:generate-knowledge-base
+/agy:generate-knowledge-base the payment-provider APIs this project integrates with
+```
+
+The first time the knowledge-base skill is created you may need to restart Claude Code (or `/reload-plugins`) for it to load.
+
+### `/agy:analyse-plan`
+
+Runs an iterative plan-review loop: agy analyses an implementation plan against the affected code, you (Claude) review that analysis and surface the disagreements, and — if you choose — the agreed changes are applied to the plan before optionally analysing again.
+
+By default it auto-detects the most recent plan file under `~/.claude/plans/`; pass a path to analyse a specific file.
+
+```bash
+/agy:analyse-plan
+/agy:analyse-plan ./docs/refactor-plan.md focus on migration safety
+```
+
+This command only edits the plan file. It does not write code.
+
 ### `/agy:rescue`
 
 Hands a task to agy through the `agy:agy-rescue` subagent.
@@ -216,6 +265,19 @@ When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted
 > [!WARNING]
 > The review gate can create a long-running Claude/agy loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
 
+#### Research options
+
+`/agy:setup` also toggles the research options (all off by default, persisted per repository):
+
+```bash
+/agy:setup --enable-save-research           # persist /agy:research reports to the knowledge base
+/agy:setup --enable-save-reviewed-research  # like above, but fact-check with a second agy pass first
+/agy:setup --enable-research-before-plan    # research architecture/tech/domain before planning
+/agy:setup --enable-research-while-plan     # research sub-topics on demand while planning
+```
+
+Each has a matching `--disable-*`. `--enable-save-reviewed-research` runs a second agy verification pass before saving, which roughly doubles research latency and cost. When the before/while-plan options are on, a `UserPromptSubmit` hook reminds Claude (once per session) to run `/agy:research` around planning.
+
 ## Typical Flows
 
 ### Review Before Shipping
@@ -255,6 +317,8 @@ You can change the default model the plugin uses per run by passing `--model <na
 Note that the `--effort` (reasoning effort) flag is accepted but currently ignored by the agy backend, so it has no effect today.
 
 The `--write` flag maps to agy's workspace-write sandbox only when that is configured via the `AGY_SANDBOX_WRITE` environment variable.
+
+Read-only runs (reviews and `/agy:research`) enforce agy's `--sandbox`. If `/agy:research` returns no web sources, your agy/sandbox combination may be blocking web access — set `AGY_NO_SANDBOX=1` and retry, and run `agy` once interactively to confirm you are signed in.
 
 Check out the [Antigravity docs](https://antigravity.google/docs) for more configuration options.
 
