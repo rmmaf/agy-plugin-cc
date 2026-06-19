@@ -66,32 +66,58 @@ function buildSetupNote(cwd) {
   return `Antigravity is not set up for the review gate.${detail} Run /agy:setup.`;
 }
 
+function stripDeprecationNoise(text) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !/\[DEP\d+\]|DeprecationWarning|--trace-deprecation/.test(line))
+    .join("\n")
+    .trim();
+}
+
+function extractFailureReason(stdout, stderr) {
+  // Prefer the structured reason the task emits on stdout (the real Antigravity
+  // error, e.g. an expired or revoked login) over stderr, which on Windows can
+  // carry only a harmless Node deprecation warning that would otherwise mask
+  // the true cause.
+  try {
+    const payload = JSON.parse(stdout);
+    const fromPayload = String(payload?.failureMessage ?? payload?.rawOutput ?? "").trim();
+    if (fromPayload) {
+      return fromPayload;
+    }
+  } catch {
+    // stdout wasn't JSON — fall back to cleaned stderr/stdout below.
+  }
+  return stripDeprecationNoise(stderr) || stripDeprecationNoise(stdout) || "";
+}
+
+const GATE_BYPASS_HINT =
+  "Run /agy:review --wait manually, re-run /agy:setup, or turn the gate off with /agy:setup --disable-review-gate.";
+
 function parseStopReviewOutput(rawOutput) {
   const text = String(rawOutput ?? "").trim();
   if (!text) {
     return {
-      ok: false,
-      reason:
-        "The stop-time Antigravity review task returned no final output. Run /agy:review --wait manually or bypass the gate."
+      verdict: "error",
+      reason: `The stop-time Antigravity review returned no final output. ${GATE_BYPASS_HINT}`
     };
   }
 
   const firstLine = text.split(/\r?\n/, 1)[0].trim();
   if (firstLine.startsWith("ALLOW:")) {
-    return { ok: true, reason: null };
+    return { verdict: "allow", reason: null };
   }
   if (firstLine.startsWith("BLOCK:")) {
     const reason = firstLine.slice("BLOCK:".length).trim() || text;
     return {
-      ok: false,
+      verdict: "block",
       reason: `Antigravity stop-time review found issues that still need fixes before ending the session: ${reason}`
     };
   }
 
   return {
-    ok: false,
-    reason:
-      "The stop-time Antigravity review task returned an unexpected answer. Run /agy:review --wait manually or bypass the gate."
+    verdict: "error",
+    reason: `The stop-time Antigravity review returned an unexpected answer (no ALLOW:/BLOCK: verdict). ${GATE_BYPASS_HINT}`
   };
 }
 
@@ -112,19 +138,18 @@ function runStopReview(cwd, input = {}) {
 
   if (result.error?.code === "ETIMEDOUT") {
     return {
-      ok: false,
-      reason:
-        "The stop-time Antigravity review task timed out after 15 minutes. Run /agy:review --wait manually or bypass the gate."
+      verdict: "error",
+      reason: `The stop-time Antigravity review timed out after 15 minutes. ${GATE_BYPASS_HINT}`
     };
   }
 
   if (result.status !== 0) {
-    const detail = String(result.stderr || result.stdout || "").trim();
+    const detail = extractFailureReason(result.stdout, result.stderr);
     return {
-      ok: false,
+      verdict: "error",
       reason: detail
-        ? `The stop-time Antigravity review task failed: ${detail}`
-        : "The stop-time Antigravity review task failed. Run /agy:review --wait manually or bypass the gate."
+        ? `The stop-time Antigravity review could not run: ${detail} ${GATE_BYPASS_HINT}`
+        : `The stop-time Antigravity review could not run. ${GATE_BYPASS_HINT}`
     };
   }
 
@@ -133,9 +158,8 @@ function runStopReview(cwd, input = {}) {
     return parseStopReviewOutput(payload?.rawOutput);
   } catch {
     return {
-      ok: false,
-      reason:
-        "The stop-time Antigravity review task returned invalid JSON. Run /agy:review --wait manually or bypass the gate."
+      verdict: "error",
+      reason: `The stop-time Antigravity review returned invalid JSON. ${GATE_BYPASS_HINT}`
     };
   }
 }
@@ -165,7 +189,9 @@ function main() {
   }
 
   const review = runStopReview(cwd, input);
-  if (!review.ok) {
+
+  // Only a genuine BLOCK verdict from a completed review stops the session.
+  if (review.verdict === "block") {
     emitDecision({
       decision: "block",
       reason: runningTaskNote ? `${runningTaskNote} ${review.reason}` : review.reason
@@ -173,6 +199,11 @@ function main() {
     return;
   }
 
+  // Fail OPEN: if the review could not run (auth lapse, timeout, infra error),
+  // surface an actionable note but never trap the session.
+  if (review.verdict === "error") {
+    logNote(review.reason);
+  }
   logNote(runningTaskNote);
 }
 

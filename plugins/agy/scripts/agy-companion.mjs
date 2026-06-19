@@ -589,6 +589,7 @@ async function executeTaskRun(request) {
     status: result.status,
     threadId: result.threadId,
     rawOutput,
+    failureMessage,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary,
     answerFile: result.answerFile ?? null,

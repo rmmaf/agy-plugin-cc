@@ -1,15 +1,54 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
+/**
+ * Decide how to invoke a command without tripping Node's DEP0190 deprecation
+ * ("passing args to a child process with shell option true").
+ *
+ * On Windows the CLIs we call (Antigravity, npm) are installed as `.cmd`/`.ps1`
+ * shims that a bare exe name can't launch with shell:false (it ENOENTs), so a
+ * shell is required. But pairing a separate argv with shell:true is exactly
+ * what DEP0190 flags. The safe form is to fold every token into one command
+ * string and hand spawn an EMPTY argv, so we do that whenever a shell is used
+ * and keep the plain argv (shell:false) everywhere else.
+ *
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {{ command: string, args: string[], shell: boolean | string }}
+ */
+export function buildShellInvocation(command, args = []) {
+  const shell = process.platform === "win32" ? (process.env.SHELL || true) : false;
+  if (!shell) {
+    return { command, args, shell };
+  }
+  const commandLine = [command, ...args].map(quoteShellToken).join(" ");
+  return { command: commandLine, args: [], shell };
+}
+
+/**
+ * Minimal quoting for the simple, internally-sourced tokens this plugin spawns
+ * (subcommands, flags, PIDs). Not a general-purpose shell escaper.
+ *
+ * @param {unknown} token
+ */
+function quoteShellToken(token) {
+  const value = String(token);
+  if (value !== "" && !/[\s"'&|<>()^%!`]/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
 export function runCommand(command, args = [], options = {}) {
-  const result = spawnSync(command, args, {
+  const invocation = buildShellInvocation(command, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
     stdio: options.stdio ?? "pipe",
-    shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+    shell: invocation.shell,
     windowsHide: true
   });
 
