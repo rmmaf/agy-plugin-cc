@@ -57,3 +57,31 @@ test("renderStoredJobResult prefers rendered output for structured review jobs",
   assert.match(output, /Antigravity session ID: thr_123/);
   assert.match(output, /Resume in Antigravity: agy --conversation=thr_123/);
 });
+
+test("renderStoredJobResult surfaces the research save footer (prefers rendered for research jobs)", () => {
+  // A research payload stores only the report BODY in result.rawOutput; the
+  // "Saved to ..."/save-error footer lives in `rendered`. /agy:result must show
+  // the footer, so research jobs prefer the rendered text like structured reviews.
+  const output = renderStoredJobResult(
+    {
+      id: "research-123",
+      status: "completed",
+      title: "Antigravity Research",
+      jobClass: "research",
+      threadId: null
+    },
+    {
+      jobClass: "research",
+      rendered:
+        "## TL;DR\n- body only\n\n---\n- Saved to /repo/.claude/agy-knowledge-base/topic.md.\n",
+      result: {
+        topic: "topic",
+        reviewed: false,
+        savedFile: "/repo/.claude/agy-knowledge-base/topic.md",
+        rawOutput: "## TL;DR\n- body only"
+      }
+    }
+  );
+
+  assert.match(output, /Saved to \/repo\/\.claude\/agy-knowledge-base\/topic\.md/);
+});

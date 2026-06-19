@@ -74,8 +74,11 @@ test("continue is not exposed as a user-facing command", () => {
   const commandFiles = fs.readdirSync(path.join(PLUGIN_ROOT, "commands")).sort();
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
+    "analyse-plan.md",
     "cancel.md",
+    "generate-knowledge-base.md",
     "rescue.md",
+    "research.md",
     "result.md",
     "review.md",
     "setup.md",
@@ -213,7 +216,9 @@ test("setup command can offer Antigravity install and still points users to agy 
   const setup = read("commands/setup.md");
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
 
-  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]'/);
+  assert.match(setup, /argument-hint:\s*'\[--enable-review-gate\|--disable-review-gate\]/);
+  assert.match(setup, /--enable-save-research\|--disable-save-research/);
+  assert.match(setup, /--enable-research-before-plan\|--disable-research-before-plan/);
   assert.match(setup, /AskUserQuestion/);
   // The OpenAI npm install was replaced with the official Antigravity installer.
   assert.match(setup, /Install Antigravity \(Recommended\)/);

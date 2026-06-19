@@ -94,6 +94,13 @@ function answerFor(text) {
       ? "ALLOW: No blocking issues found in the previous turn."
       : "BLOCK: Missing empty-state guard in src/app.js:4-6.";
   }
+  if (value.includes("fact-checking a research report")) {
+    // Research verification (second) pass. "verify-unmarked" returns a body with
+    // no VERIFIED/CORRECTED marker so callers must treat it as not-reviewed.
+    return BEHAVIOR === "verify-unmarked"
+      ? "I checked the report and it seems fine overall."
+      : "VERIFIED: All claims check out.\\nThe report stands.";
+  }
   if (/^Review /.test(value)) {
     return "No material issues found in the reviewed changes.";
   }

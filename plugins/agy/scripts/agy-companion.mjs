@@ -25,6 +25,16 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  buildResearchPrompt,
+  buildVerificationPrompt,
+  formatPrintTimeout,
+  INTENSITY_PRESETS,
+  parseGoDurationSeconds,
+  parseVerificationOutput,
+  resolveIntensity
+} from "./lib/research-prompts.mjs";
+import { regenerateIndexSkill, writeKbEntry } from "./lib/knowledge-base.mjs";
+import {
   generateJobId,
   getConfig,
   listJobs,
@@ -57,6 +67,7 @@ import {
   renderStoredJobResult,
   renderCancelReport,
   renderJobStatusReport,
+  renderResearchResult,
   renderSetupReport,
   renderStatusReport,
   renderTaskResult
@@ -69,6 +80,41 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high"]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
+// Boolean research config flags toggled through `/agy:setup`, following the
+// same enable/disable pattern as the stop-time review gate. Each maps a kebab
+// flag pair to a camelCase config key (persisted in state.json) and a report
+// field surfaced by buildSetupReport/renderSetupReport.
+const RESEARCH_CONFIG_FLAGS = [
+  {
+    key: "saveResearch",
+    enable: "enable-save-research",
+    disable: "disable-save-research",
+    label: "save research",
+    reportKey: "saveResearchEnabled"
+  },
+  {
+    key: "saveReviewedResearch",
+    enable: "enable-save-reviewed-research",
+    disable: "disable-save-reviewed-research",
+    label: "save reviewed research",
+    reportKey: "saveReviewedResearchEnabled"
+  },
+  {
+    key: "researchBeforePlan",
+    enable: "enable-research-before-plan",
+    disable: "disable-research-before-plan",
+    label: "research before plan",
+    reportKey: "researchBeforePlanEnabled"
+  },
+  {
+    key: "researchWhilePlan",
+    enable: "enable-research-while-plan",
+    disable: "disable-research-while-plan",
+    label: "research while plan",
+    reportKey: "researchWhilePlanEnabled"
+  }
+];
+
 function printUsage() {
   console.log(
     [
@@ -77,6 +123,8 @@ function printUsage() {
       "  node scripts/agy-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/agy-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/agy-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <none|minimal|low|medium|high>] [prompt]",
+      "  node scripts/agy-companion.mjs research [--intensity <low|medium|high>] [--background] [--save] [--model <model>] <topic>",
+      "  node scripts/agy-companion.mjs analyse-plan [--plan-file <path>] [--model <model>] [focus text]",
       "  node scripts/agy-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/agy-companion.mjs result [job-id] [--json]",
       "  node scripts/agy-companion.mjs cancel [job-id] [--json]"
@@ -193,6 +241,17 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   if (!config.stopReviewGate) {
     nextSteps.push("Optional: run `/agy:setup --enable-review-gate` to require a fresh review before stop.");
   }
+  if (!config.saveResearch && !config.saveReviewedResearch) {
+    nextSteps.push("Optional: run `/agy:setup --enable-save-research` to persist `/agy:research` reports to a project knowledge base.");
+  }
+  if (config.saveReviewedResearch) {
+    nextSteps.push("Note: \"save reviewed research\" runs a second Antigravity verification pass before saving, which roughly doubles research latency and cost.");
+  }
+
+  const researchFlags = {};
+  for (const flag of RESEARCH_CONFIG_FLAGS) {
+    researchFlags[flag.reportKey] = Boolean(config[flag.key]);
+  }
 
   return {
     // A live Google sign-in cannot be verified without invoking agy, so base
@@ -204,19 +263,26 @@ async function buildSetupReport(cwd, actionsTaken = []) {
     auth: authStatus,
     sessionRuntime: getSessionRuntimeStatus(process.env, workspaceRoot),
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    ...researchFlags,
     actionsTaken,
     nextSteps
   };
 }
 
 async function handleSetup(argv) {
+  const researchFlagOptions = RESEARCH_CONFIG_FLAGS.flatMap((flag) => [flag.enable, flag.disable]);
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
-    booleanOptions: ["json", "enable-review-gate", "disable-review-gate"]
+    booleanOptions: ["json", "enable-review-gate", "disable-review-gate", ...researchFlagOptions]
   });
 
   if (options["enable-review-gate"] && options["disable-review-gate"]) {
     throw new Error("Choose either --enable-review-gate or --disable-review-gate.");
+  }
+  for (const flag of RESEARCH_CONFIG_FLAGS) {
+    if (options[flag.enable] && options[flag.disable]) {
+      throw new Error(`Choose either --${flag.enable} or --${flag.disable}.`);
+    }
   }
 
   const cwd = resolveCommandCwd(options);
@@ -229,6 +295,16 @@ async function handleSetup(argv) {
   } else if (options["disable-review-gate"]) {
     setConfig(workspaceRoot, "stopReviewGate", false);
     actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  }
+
+  for (const flag of RESEARCH_CONFIG_FLAGS) {
+    if (options[flag.enable]) {
+      setConfig(workspaceRoot, flag.key, true);
+      actionsTaken.push(`Enabled "${flag.label}" for ${workspaceRoot}.`);
+    } else if (options[flag.disable]) {
+      setConfig(workspaceRoot, flag.key, false);
+      actionsTaken.push(`Disabled "${flag.label}" for ${workspaceRoot}.`);
+    }
   }
 
   const finalReport = await buildSetupReport(cwd, actionsTaken);
@@ -532,6 +608,196 @@ async function executeTaskRun(request) {
   };
 }
 
+function applyResearchTimeoutBudget(timeoutSec) {
+  // Each `node agy-companion.mjs research` invocation (and each detached
+  // task-worker) is its own OS process, so setting these env vars is
+  // process-local and cannot race other runs. Respect any user override.
+  if (!process.env.AGY_PRINT_TIMEOUT || !process.env.AGY_PRINT_TIMEOUT.trim()) {
+    process.env.AGY_PRINT_TIMEOUT = formatPrintTimeout(timeoutSec);
+  }
+  if (!process.env.AGY_TIMEOUT_MS || !process.env.AGY_TIMEOUT_MS.trim()) {
+    // Keep the hard wall-clock ceiling above the EFFECTIVE print-timeout. A user
+    // may have raised AGY_PRINT_TIMEOUT without also raising AGY_TIMEOUT_MS, so
+    // base the headroom on whichever is larger — the preset or the user's
+    // print-timeout — otherwise a long user-requested run would be killed early.
+    const printSec = parseGoDurationSeconds(process.env.AGY_PRINT_TIMEOUT);
+    const effectiveSec = Math.max(Math.round(timeoutSec), Math.round(printSec ?? 0));
+    process.env.AGY_TIMEOUT_MS = String((Math.max(1, effectiveSec) + 120) * 1000);
+  }
+}
+
+async function executeResearchRun(request) {
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  ensureAntigravityAvailable(request.cwd);
+
+  const intensity = resolveIntensity(request.intensity);
+  const preset = INTENSITY_PRESETS[intensity];
+  const topic = String(request.topic ?? "").trim();
+  if (!topic) {
+    throw new Error("Provide a research topic.");
+  }
+
+  applyResearchTimeoutBudget(preset.timeoutSec);
+
+  const result = await runAppServerTurn(workspaceRoot, {
+    prompt: buildResearchPrompt({ topic, intensity }),
+    model: request.model,
+    sandbox: "read-only",
+    onProgress: request.onProgress
+  });
+
+  const firstReport = typeof result.finalMessage === "string" ? result.finalMessage : "";
+  const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const succeeded = result.status === 0 && Boolean(firstReport.trim());
+
+  // Save precedence: saveReviewedResearch -> verify then save; else --save or
+  // saveResearch -> save raw; else don't save.
+  const cfg = getConfig(workspaceRoot);
+  const verify = Boolean(cfg.saveReviewedResearch);
+  const wantSave = verify || Boolean(request.save) || Boolean(cfg.saveResearch);
+
+  let finalBody = firstReport;
+  let reviewed = false;
+  let verificationNote = null;
+
+  if (verify && succeeded) {
+    const verifyResult = await runAppServerTurn(workspaceRoot, {
+      prompt: buildVerificationPrompt({ topic, firstReport }),
+      model: request.model,
+      sandbox: "read-only",
+      onProgress: request.onProgress
+    });
+    const verifyText = typeof verifyResult.finalMessage === "string" ? verifyResult.finalMessage : "";
+    // Only trust the verify pass when it succeeded with real text AND followed
+    // the VERIFIED/CORRECTED contract. A turn that ends on tool calls returns a
+    // non-empty boilerplate "no text answer" note (status 0, no marker);
+    // accepting that would clobber the genuine first report and mislabel it as
+    // reviewed. In every unusable/unmarked case, keep the first report and save
+    // it as unverified rather than overwriting it.
+    const usable = verifyResult.status === 0 && !verifyResult.diagnostic && Boolean(verifyText.trim());
+    const parsed = usable ? parseVerificationOutput(verifyText) : null;
+    if (parsed && parsed.status === "verified") {
+      // VERIFIED means "report unchanged" — keep the original report as-is.
+      reviewed = true;
+      verificationNote = parsed.note
+        ? `Verified by a second Antigravity pass; no corrections needed. ${parsed.note}`
+        : "Verified by a second Antigravity pass; no corrections needed.";
+    } else if (parsed && parsed.status === "corrected" && parsed.body) {
+      finalBody = parsed.body;
+      reviewed = true;
+      verificationNote = parsed.note
+        ? `Verified by a second Antigravity pass; corrections applied: ${parsed.note}`
+        : "Verified by a second Antigravity pass; corrections applied.";
+    } else {
+      reviewed = false;
+      verificationNote =
+        "Verification pass did not return a usable VERIFIED/CORRECTED result; saved the unverified report.";
+    }
+  }
+
+  let savedFile = null;
+  let indexResult = null;
+  let saveError = null;
+  if (wantSave && succeeded && finalBody.trim()) {
+    try {
+      const written = writeKbEntry(workspaceRoot, { topic, intensity, reviewed, body: finalBody });
+      savedFile = written.file;
+      indexResult = regenerateIndexSkill(workspaceRoot);
+    } catch (error) {
+      saveError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  const rawOutput = reviewed ? finalBody : firstReport;
+  const rendered = renderResearchResult(
+    { rawOutput, failureMessage, reasoningSummary: result.reasoningSummary },
+    { topic, intensity, savedFile, reviewed, verificationNote, saveError, indexResult }
+  );
+
+  const payload = {
+    status: result.status,
+    threadId: result.threadId,
+    topic,
+    intensity,
+    reviewed,
+    rawOutput,
+    savedFile,
+    answerFile: result.answerFile ?? null,
+    diagnostic: result.diagnostic ?? null,
+    reasoningSummary: result.reasoningSummary
+  };
+
+  return {
+    exitStatus: result.status,
+    threadId: result.threadId,
+    turnId: result.turnId,
+    payload,
+    rendered,
+    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `Research on ${shorten(topic, 60)} finished.`)),
+    jobTitle: "Antigravity Research",
+    jobClass: "research"
+  };
+}
+
+function buildAnalysePlanPrompt({ planText, affectedContext, focusText }) {
+  const template = loadPromptTemplate(ROOT_DIR, "analyse-plan");
+  return interpolateTemplate(template, {
+    PLAN_TEXT: planText || "(no plan text provided)",
+    AFFECTED_FILE_CONTEXT:
+      affectedContext && affectedContext.trim()
+        ? affectedContext
+        : "(no inline file context provided — read the affected files from the repository as needed)",
+    USER_FOCUS: focusText || "No extra focus provided."
+  });
+}
+
+async function executeAnalysePlanRun(request) {
+  const workspaceRoot = resolveWorkspaceRoot(request.cwd);
+  ensureAntigravityAvailable(request.cwd);
+
+  const planText = String(request.planText ?? "").trim();
+  if (!planText) {
+    throw new Error("No plan text to analyse. Pass --plan-file <path> or pipe the plan on stdin.");
+  }
+
+  const result = await runAppServerTurn(workspaceRoot, {
+    prompt: buildAnalysePlanPrompt({
+      planText,
+      affectedContext: request.affectedContext,
+      focusText: request.focusText
+    }),
+    model: request.model,
+    sandbox: "read-only",
+    onProgress: request.onProgress
+  });
+
+  const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
+  const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const rendered = renderTaskResult(
+    { rawOutput, failureMessage, reasoningSummary: result.reasoningSummary },
+    { title: "Antigravity Plan Analysis", jobId: request.jobId ?? null, write: false }
+  );
+  const payload = {
+    status: result.status,
+    threadId: result.threadId,
+    rawOutput,
+    answerFile: result.answerFile ?? null,
+    diagnostic: result.diagnostic ?? null,
+    reasoningSummary: result.reasoningSummary
+  };
+
+  return {
+    exitStatus: result.status,
+    threadId: result.threadId,
+    turnId: result.turnId,
+    payload,
+    rendered,
+    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, "Plan analysis finished.")),
+    jobTitle: "Antigravity Plan Analysis",
+    jobClass: "analyse-plan"
+  };
+}
+
 function buildReviewJobMetadata(reviewName, target) {
   return {
     kind: reviewName === "Adversarial Review" ? "adversarial-review" : "review",
@@ -563,6 +829,12 @@ function renderQueuedTaskLaunch(payload) {
 function getJobKindLabel(kind, jobClass) {
   if (kind === "adversarial-review") {
     return "adversarial-review";
+  }
+  if (kind === "research") {
+    return "research";
+  }
+  if (kind === "analyse-plan") {
+    return "analyse-plan";
   }
   return jobClass === "review" ? "review" : "rescue";
 }
@@ -616,6 +888,21 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
   };
 }
 
+function buildResearchJob(workspaceRoot, topic) {
+  return createCompanionJob({
+    prefix: "research",
+    kind: "research",
+    title: "Antigravity Research",
+    workspaceRoot,
+    jobClass: "research",
+    summary: shorten(topic)
+  });
+}
+
+function buildResearchRequest({ cwd, model, intensity, topic, save, jobId }) {
+  return { cwd, model, intensity, topic, save, jobId };
+}
+
 function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
@@ -661,17 +948,30 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  // Persist the job record (including the `request` the detached worker
+  // re-reads) BEFORE spawning the worker. Otherwise a fast-booting worker — or a
+  // parent whose write is delayed by state-lock contention — can look up its job
+  // before the record exists on disk and die with "No stored job found". The
+  // worker fills in its own pid when it flips to running; we still record the
+  // spawned worker's pid in the index afterwards so cancelling a still-queued
+  // job can terminate it.
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  const child = spawnDetachedTaskWorker(cwd, job.id);
+  if (child.pid != null) {
+    // Index-only, shallow-merged pid patch: it updates just the pid and never
+    // overwrites a status the worker may have already written when it started.
+    upsertJob(job.workspaceRoot, { id: job.id, pid: child.pid });
+  }
 
   return {
     payload: {
@@ -798,6 +1098,105 @@ async function handleTask(argv) {
   );
 }
 
+async function handleResearch(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["intensity", "model", "cwd"],
+    booleanOptions: ["json", "background", "wait", "save"],
+    aliasMap: {
+      m: "model"
+    }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const model = normalizeRequestedModel(options.model);
+  const intensity = resolveIntensity(options.intensity);
+  const topic = positionals.join(" ").trim();
+  if (!topic) {
+    throw new Error("Provide a research topic, e.g. /agy:research <topic>.");
+  }
+  const save = Boolean(options.save);
+
+  if (options.background) {
+    ensureAntigravityAvailable(cwd);
+    const job = buildResearchJob(workspaceRoot, topic);
+    const request = buildResearchRequest({ cwd, model, intensity, topic, save, jobId: job.id });
+    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
+    return;
+  }
+
+  const job = buildResearchJob(workspaceRoot, topic);
+  await runForegroundCommand(
+    job,
+    (progress) =>
+      executeResearchRun({
+        cwd,
+        model,
+        intensity,
+        topic,
+        save,
+        jobId: job.id,
+        onProgress: progress
+      }),
+    { json: options.json }
+  );
+}
+
+async function handleAnalysePlan(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["plan-file", "model", "cwd"],
+    booleanOptions: ["json"],
+    aliasMap: {
+      m: "model"
+    }
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const model = normalizeRequestedModel(options.model);
+  const focusText = positionals.join(" ").trim();
+
+  // The companion stays a pure read-and-run boundary: Claude resolves the plan
+  // file (its location is machine/version specific) and passes it via
+  // --plan-file; any pre-read affected-file context arrives on stdin.
+  let planText = "";
+  let affectedContext = "";
+  if (options["plan-file"]) {
+    planText = fs.readFileSync(path.resolve(cwd, options["plan-file"]), "utf8");
+    affectedContext = readStdinIfPiped();
+  } else {
+    planText = readStdinIfPiped();
+  }
+
+  if (!planText.trim()) {
+    throw new Error("Provide a plan via --plan-file <path> or piped stdin.");
+  }
+
+  const job = createCompanionJob({
+    prefix: "analyse-plan",
+    kind: "analyse-plan",
+    title: "Antigravity Plan Analysis",
+    workspaceRoot,
+    jobClass: "analyse-plan",
+    summary: shorten(focusText || "Plan analysis")
+  });
+  await runForegroundCommand(
+    job,
+    (progress) =>
+      executeAnalysePlanRun({
+        cwd,
+        model,
+        planText,
+        affectedContext,
+        focusText,
+        jobId: job.id,
+        onProgress: progress
+      }),
+    { json: options.json }
+  );
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
@@ -819,6 +1218,10 @@ async function handleTaskWorker(argv) {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
   }
 
+  // Background jobs share one detached worker body; route by the stored job
+  // class so a queued research run executes the research path, not the task one.
+  const runner = storedJob.jobClass === "research" ? executeResearchRun : executeTaskRun;
+
   const { logFile, progress } = createTrackedProgress(
     {
       ...storedJob,
@@ -835,7 +1238,7 @@ async function handleTaskWorker(argv) {
       logFile
     },
     () =>
-      executeTaskRun({
+      runner({
         ...request,
         onProgress: progress
       }),
@@ -1005,6 +1408,12 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
+      break;
+    case "research":
+      await handleResearch(argv);
+      break;
+    case "analyse-plan":
+      await handleAnalysePlan(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);

@@ -285,6 +285,158 @@ test("stop-review gate allows the stop (no decision) when agy returns ALLOW", ()
 });
 
 /* ------------------------------------------------------------------ *
+ * research + analyse-plan
+ * ------------------------------------------------------------------ */
+
+test("research returns the report and does not save to the knowledge base by default", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv();
+
+  const result = run("node", [SCRIPT, "research", "vector databases", "--json"], { cwd: repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.match(payload.rawOutput, /Handled the requested task/);
+  assert.equal(payload.savedFile, null);
+  assert.equal(payload.reviewed, false);
+  assert.equal(
+    fs.existsSync(path.join(repo, ".claude", "agy-knowledge-base")),
+    false,
+    "a default research run must not create a knowledge base"
+  );
+});
+
+test("research --save writes a knowledge-base entry and regenerates the index skill", () => {
+  const repo = setupRepo();
+  const { binDir, env } = fakeEnv();
+
+  const result = run("node", [SCRIPT, "research", "--save", "caching strategies", "--json"], { cwd: repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.ok(payload.savedFile, "expected a savedFile path");
+  assert.ok(fs.existsSync(payload.savedFile));
+  const entry = fs.readFileSync(payload.savedFile, "utf8");
+  assert.match(entry, /reviewed: false/);
+  assert.match(entry, /Handled the requested task/);
+
+  const skill = path.join(repo, ".claude", "skills", "agy-knowledge-base", "SKILL.md");
+  assert.ok(fs.existsSync(skill), "expected the index skill to be written");
+  assert.match(fs.readFileSync(skill, "utf8"), /name: agy-knowledge-base/);
+
+  // A single agy --print run (no verification pass for a raw save).
+  assert.equal(readFakeState(binDir).runs, 1);
+});
+
+test("research enforces agy's --sandbox so a read-only research run cannot modify files", () => {
+  const repo = setupRepo();
+  const { binDir, env } = fakeEnv();
+
+  const result = run("node", [SCRIPT, "research", "anything", "--json"], { cwd: repo, env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(readFakeState(binDir).lastRun.argv.includes("--sandbox"), "research must run agy with --sandbox");
+});
+
+test("research saves a reviewed entry and runs a second verification pass when saveReviewedResearch is enabled", () => {
+  const repo = setupRepo();
+  const { binDir, env } = fakeEnv();
+
+  const enable = run("node", [SCRIPT, "setup", "--enable-save-reviewed-research", "--json"], { cwd: repo, env });
+  assert.equal(enable.status, 0, enable.stderr);
+  // `setup` only runs `agy --version`, which the fake handles before writing any
+  // state file — so the only --print invocations are this research run's.
+
+  const result = run("node", [SCRIPT, "research", "supply chain security", "--json"], { cwd: repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.reviewed, true);
+  assert.ok(payload.savedFile && fs.existsSync(payload.savedFile));
+  const saved = fs.readFileSync(payload.savedFile, "utf8");
+  assert.match(saved, /reviewed: true/);
+  // A VERIFIED pass keeps the original report; it must NOT clobber it with the
+  // verifier's own marker text.
+  assert.match(saved, /Handled the requested task/);
+  assert.doesNotMatch(saved, /The report stands/);
+
+  // Two --print invocations: the research pass plus the verification pass.
+  assert.equal(readFakeState(binDir).runs, 2, "reviewed research must invoke agy twice");
+});
+
+test("reviewed research keeps the first report UNVERIFIED when the verify pass omits the VERIFIED/CORRECTED marker", () => {
+  // Regression for the verify-clobber bug: an unmarked (or boilerplate
+  // tool-call) verify answer must never overwrite the genuine first report or
+  // be mislabeled as reviewed.
+  const repo = setupRepo();
+  const { env } = fakeEnv("verify-unmarked");
+
+  const enable = run("node", [SCRIPT, "setup", "--enable-save-reviewed-research", "--json"], { cwd: repo, env });
+  assert.equal(enable.status, 0, enable.stderr);
+
+  const result = run("node", [SCRIPT, "research", "some topic", "--json"], { cwd: repo, env });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.reviewed, false, "an unmarked verify pass must not be claimed as reviewed");
+  assert.ok(payload.savedFile && fs.existsSync(payload.savedFile));
+  const saved = fs.readFileSync(payload.savedFile, "utf8");
+  assert.match(saved, /reviewed: false/);
+  // The genuine first report is preserved, NOT replaced by the unmarked verify body.
+  assert.match(saved, /Handled the requested task/);
+  assert.doesNotMatch(saved, /seems fine overall/);
+});
+
+test("analyse-plan reads a plan file, forwards the plan text, and runs read-only", () => {
+  const repo = setupRepo();
+  const { binDir, env } = fakeEnv();
+  const planFile = path.join(repo, "PLAN.md");
+  fs.writeFileSync(planFile, "# Plan\n\nRefactor src/app.js to add input validation.\n", "utf8");
+
+  const result = run("node", [SCRIPT, "analyse-plan", "--plan-file", planFile, "--json"], {
+    cwd: repo,
+    env,
+    input: ""
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.match(payload.rawOutput, /Handled the requested task/);
+
+  const lastRun = readFakeState(binDir).lastRun;
+  assert.match(lastRun.prompt, /Refactor src\/app\.js to add input validation/);
+  assert.ok(lastRun.argv.includes("--sandbox"), "analyse-plan must run agy read-only");
+});
+
+test("background research worker finds its job record and completes (no startup race)", () => {
+  const repo = setupRepo();
+  const { env } = fakeEnv();
+  const e = env;
+
+  const launch = run("node", [SCRIPT, "research", "--background", "background topic", "--json"], { cwd: repo, env: e });
+  assert.equal(launch.status, 0, launch.stderr);
+  const launched = JSON.parse(launch.stdout);
+  assert.equal(launched.status, "queued");
+  assert.ok(launched.jobId, "expected a queued job id");
+
+  // The detached worker must find the job record (with its request) that the
+  // parent wrote BEFORE spawning it, then run to completion. If the enqueue
+  // ordering regressed, the worker would fail with "No stored job found".
+  const waited = run(
+    "node",
+    [SCRIPT, "status", launched.jobId, "--wait", "--timeout-ms", "30000", "--poll-interval-ms", "250", "--json"],
+    { cwd: repo, env: e }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(
+    snapshot.job.status,
+    "completed",
+    `background worker did not complete cleanly: ${JSON.stringify(snapshot.job)}`
+  );
+  assert.ok(snapshot.job.threadId, "a completed research worker should record a conversation id");
+});
+
+/* ------------------------------------------------------------------ *
  * parseStructuredOutput / stripCodeFence (fix #0: fenced JSON)
  * ------------------------------------------------------------------ */
 

@@ -32,7 +32,7 @@ let atomicWriteCounter = 0;
  * so two writers never collide on the temp file itself. The temp file is
  * cleaned up on a best-effort basis if the write or rename fails.
  */
-function atomicWriteFileSync(target, contents) {
+export function atomicWriteFileSync(target, contents) {
   atomicWriteCounter += 1;
   const tmp = `${target}.${process.pid}.${atomicWriteCounter}.tmp`;
   try {
@@ -58,7 +58,11 @@ function defaultState() {
   return {
     version: STATE_VERSION,
     config: {
-      stopReviewGate: false
+      stopReviewGate: false,
+      saveResearch: false,
+      saveReviewedResearch: false,
+      researchBeforePlan: false,
+      researchWhilePlan: false
     },
     jobs: []
   };

@@ -187,6 +187,10 @@ export function renderSetupReport(report) {
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
     `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- save research: ${report.saveResearchEnabled ? "enabled" : "disabled"}`,
+    `- save reviewed research: ${report.saveReviewedResearchEnabled ? "enabled" : "disabled"}`,
+    `- research before plan: ${report.researchBeforePlanEnabled ? "enabled" : "disabled"}`,
+    `- research while plan: ${report.researchWhilePlanEnabled ? "enabled" : "disabled"}`,
     ""
   ];
 
@@ -322,6 +326,44 @@ export function renderTaskResult(parsedResult, meta) {
   return `${message}\n`;
 }
 
+export function renderResearchResult(parsedResult, meta = {}) {
+  const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  const lines = [];
+  if (rawOutput.trim()) {
+    lines.push(rawOutput.trimEnd());
+  } else {
+    const message =
+      String(parsedResult?.failureMessage ?? "").trim() || "Antigravity did not return a research report.";
+    lines.push(message);
+  }
+
+  const footer = [];
+  if (meta.savedFile) {
+    footer.push(`Saved to ${meta.savedFile}${meta.reviewed ? " (reviewed)" : ""}.`);
+    if (meta.indexResult?.skillFile) {
+      const count = meta.indexResult.count ?? 0;
+      footer.push(
+        `Knowledge-base index skill updated (${count} ${count === 1 ? "entry" : "entries"}). If the \`agy-knowledge-base\` skill does not load this session, restart Claude Code or run /reload-plugins.`
+      );
+    }
+  }
+  if (meta.verificationNote) {
+    footer.push(meta.verificationNote);
+  }
+  if (meta.saveError) {
+    footer.push(`Could not save to the knowledge base: ${meta.saveError}`);
+  }
+
+  if (footer.length > 0) {
+    lines.push("", "---");
+    for (const note of footer) {
+      lines.push(`- ${note}`);
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
 export function renderStatusReport(report) {
   const lines = [
     "# Antigravity Status",
@@ -387,10 +429,18 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+function isResearchStoredResult(job, storedJob) {
+  // Research jobs put the report body in result.rawOutput but the save/verify
+  // footer (Saved to .../save errors/verification note) lives only in
+  // `rendered`, so /agy:result must prefer the rendered text the way structured
+  // reviews do — otherwise the save outcome is silently dropped.
+  return job?.jobClass === "research" || storedJob?.jobClass === "research";
+}
+
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `agy --conversation=${threadId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
+  if ((isStructuredReviewStoredResult(storedJob) || isResearchStoredResult(job, storedJob)) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {
       return output;
