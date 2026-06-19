@@ -143,6 +143,13 @@ function runStopReview(cwd, input = {}) {
     };
   }
 
+  if (result.error) {
+    return {
+      verdict: "error",
+      reason: `The stop-time Antigravity review could not be started (${result.error.code ?? "spawn error"}): ${result.error.message}. ${GATE_BYPASS_HINT}`
+    };
+  }
+
   if (result.status !== 0) {
     const detail = extractFailureReason(result.stdout, result.stderr);
     return {
@@ -210,7 +217,8 @@ function main() {
 try {
   main();
 } catch (error) {
+  // Fail OPEN: a crash inside the gate itself must never trap the session.
+  // Surface the cause as a note and leave exit code 0 so the Stop is allowed.
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
+  process.stderr.write(`Stop-review gate skipped (internal error): ${message}\n`);
 }
