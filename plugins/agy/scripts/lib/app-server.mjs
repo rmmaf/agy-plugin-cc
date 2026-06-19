@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { terminateProcessTree, buildShellInvocation } from "./process.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -186,11 +186,12 @@ class SpawnedAntigravityAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("Antigravity", ["app-server"], {
+    const invocation = buildShellInvocation("Antigravity", ["app-server"]);
+    this.proc = spawn(invocation.command, invocation.args, {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+      shell: invocation.shell,
       windowsHide: true
     });
 
