@@ -15,7 +15,7 @@ Raw slash-command arguments:
 - If `$ARGUMENTS` begins with a path to an existing file, treat that as the plan file. Any trailing text is extra focus for the analysis.
 - Otherwise auto-detect the most recent plan file. Plan-mode plan files are stored under `~/.claude/plans/` on this machine; pick the newest with this cross-platform node one-liner (covered by `Bash(node:*)`):
 ```bash
-node -e "const fs=require('fs'),os=require('os'),p=require('path');const d=p.join(os.homedir(),'.claude','plans');let best=null;try{for(const f of fs.readdirSync(d)){if(!f.endsWith('.md'))continue;const t=fs.statSync(p.join(d,f)).mtimeMs;if(!best||t>best.t)best={f,t};}}catch{}if(best)console.log(p.join(d,best.f));"
+node -e "const fs=require('fs'),os=require('os'),p=require('path');const d=p.join(os.homedir(),'.claude','plans');let best=null;try{for(const f of fs.readdirSync(d)){if(!f.endsWith('.md'))continue;try{const t=fs.statSync(p.join(d,f)).mtimeMs;if(!best||t>best.t)best={f,t};}catch{}}}catch{}if(best)console.log(p.join(d,best.f));"
 ```
   If it prints nothing (none found) or your Claude Code version stores plans elsewhere, ask the user for the plan-file path before continuing.
 - `Read` the plan file. Identify the files it names as affected and `Read`/`Grep` the relevant ones so you understand the current code.

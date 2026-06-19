@@ -8,6 +8,7 @@
 // description (which drives Claude Code's automatic skill loading) always lists
 // the covered topics and links each entry.
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -21,13 +22,22 @@ const KB_SKILL_NAME = "agy-knowledge-base";
 const MAX_DESCRIPTION_TOPICS_CHARS = 700;
 
 export function slugifyTopic(topic) {
-  const base = String(topic ?? "")
-    .trim()
+  const raw = String(topic ?? "").trim();
+  const base = raw
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   const trimmed = base.slice(0, 60).replace(/-+$/g, "");
-  return trimmed || "research";
+  if (trimmed) {
+    return trimmed;
+  }
+  // A purely non-ASCII topic (e.g. Chinese/Japanese/Cyrillic) slugifies to
+  // empty. Derive a stable slug from a short hash of the original topic so
+  // distinct topics don't all collide on "research" and overwrite each other.
+  if (raw) {
+    return `research-${createHash("sha256").update(raw).digest("hex").slice(0, 8)}`;
+  }
+  return "research";
 }
 
 export function kbDir(repoRoot) {
@@ -172,7 +182,9 @@ export function regenerateIndexSkill(repoRoot) {
     for (const entry of entries) {
       const created = entry.created ? ` — ${entry.created}` : "";
       const reviewed = entry.reviewed ? " (reviewed)" : "";
-      lines.push(`- [${entry.title}](../../${KB_DIR_NAME}/${entry.slug}.md)${created}${reviewed}`);
+      // Escape brackets so a title containing [ or ] can't break the Markdown link.
+      const safeTitle = String(entry.title).replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+      lines.push(`- [${safeTitle}](../../${KB_DIR_NAME}/${entry.slug}.md)${created}${reviewed}`);
     }
   }
 

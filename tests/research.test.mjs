@@ -113,6 +113,15 @@ test("slugifyTopic produces filesystem-safe, bounded slugs", () => {
   assert.ok(slugifyTopic("a".repeat(80)).length <= 60);
 });
 
+test("slugifyTopic gives purely non-ASCII topics distinct, stable slugs (no 'research' collision)", () => {
+  const cjk1 = slugifyTopic("ベクトルデータベース");
+  const cjk2 = slugifyTopic("向量数据库");
+  assert.match(cjk1, /^research-[0-9a-f]{8}$/);
+  assert.match(cjk2, /^research-[0-9a-f]{8}$/);
+  assert.notEqual(cjk1, cjk2, "distinct non-ASCII topics must not collide on the same slug");
+  assert.equal(slugifyTopic("ベクトルデータベース"), cjk1, "the slug must be stable for the same topic");
+});
+
 test("writeKbEntry writes the locked frontmatter and is idempotent per topic", () => {
   const repo = makeTempDir();
   const first = writeKbEntry(repo, {
@@ -169,6 +178,15 @@ test("regenerateIndexSkill writes an index skill that links each entry relativel
   assert.match(text, /Topic Two/);
   // Link target climbs out of .claude/skills/agy-knowledge-base/ into .claude/agy-knowledge-base/.
   assert.match(text, /\]\(\.\.\/\.\.\/agy-knowledge-base\/topic-one\.md\)/);
+});
+
+test("regenerateIndexSkill escapes brackets in entry titles so Markdown links don't break", () => {
+  const repo = makeTempDir();
+  writeKbEntry(repo, { topic: "Arrays [advanced]", intensity: "low", reviewed: false, body: "b" });
+  const { skillFile } = regenerateIndexSkill(repo);
+  const text = fs.readFileSync(skillFile, "utf8");
+  // Title brackets must be backslash-escaped in the link text.
+  assert.match(text, /- \[Arrays \\\[advanced\\\]\]\(/);
 });
 
 // ---------------------------------------------------------------------------
